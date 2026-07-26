@@ -14,6 +14,9 @@ on:
         default: '5'
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   run-parallel-bulk:
     runs-on: ubuntu-latest
@@ -175,9 +178,7 @@ jobs:
               total_count = int(os.environ.get("INPUT_COUNT", "5"))
               max_workers = int(os.environ.get("INPUT_PARALLEL", "5"))
               
-              output_dir = os.path.abspath("bulk_output")
-              os.makedirs(output_dir, exist_ok=True)
-              file_path = os.path.join(output_dir, "bulk_api_keys.txt")
+              file_path = "bulk_api_keys.txt"
               
               print(f"Running parallel generation for {total_count} accounts using {max_workers} concurrent workers...")
               
@@ -205,8 +206,11 @@ jobs:
         run: |
           xvfb-run --server-args="-screen 0 1920x1080x24" python run_parallel_mistral.py
 
-      - name: Upload Bulk API Keys Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mistral-bulk-api-keys
-          path: bulk_output/bulk_api_keys.txt
+      - name: Commit and Push bulk_api_keys.txt to repository root
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add bulk_api_keys.txt
+          git status
+          git commit -m "chore: auto-generate bulk mistral api keys" || echo "No changes to commit"
+          git push
