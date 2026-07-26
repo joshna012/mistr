@@ -1,16 +1,21 @@
-name: Camoufox Mistral Bulk API Key Generator
+name: Camoufox Mistral Parallel Bulk API Key Generator
 
 on:
   workflow_dispatch:
     inputs:
       count:
-        description: 'Number of accounts/API keys to generate'
+        description: 'Total number of accounts/API keys to generate'
+        required: true
+        default: '5'
+        type: string
+      parallel:
+        description: 'Number of parallel workers (browsers)'
         required: true
         default: '5'
         type: string
 
 jobs:
-  run-bulk-browser:
+  run-parallel-bulk:
     runs-on: ubuntu-latest
     
     steps:
@@ -33,37 +38,34 @@ jobs:
           pip install camoufox playwright requests
           camoufox fetch
 
-      - name: Create Bulk Python automation script
+      - name: Create Parallel Python automation script
         run: |
-          cat << 'EOF' > run_bulk_mistral.py
+          cat << 'EOF' > run_parallel_mistral.py
           import os
           import random
           import re
           import time
           import requests
+          from concurrent.futures import ThreadPoolExecutor, as_completed
           from camoufox.sync_api import Camoufox
 
           API_BASE = "https://api.edu-mails.com/api"
 
           def get_edu_email():
-              print("Fetching active educational domains...")
               res = requests.get(f"{API_BASE}/domains")
               data = res.json()
-              
               if data.get("status") != "success" or not data["data"]["domains"]:
-                  raise Exception("Failed to fetch domains from EduMails API")
+                  raise Exception(f"Failed to fetch domains: {data}")
               
               domain = data["data"]["domains"][0]
               domain_id = domain["id"]
               alias = f"user{random.randint(100000, 999999)}"
               
-              print(f"Generating temporary email for alias '{alias}' on domain '{domain['name']}'...")
               payload = {
                   "action": "custom",
                   "alias": alias,
                   "domain_id": domain_id
               }
-              
               gen_res = requests.post(f"{API_BASE}/emails/generate", json=payload)
               gen_data = gen_res.json()
               
@@ -74,156 +76,134 @@ jobs:
               return email_info["address"], email_info["uuid"]
 
           def fetch_otp(uuid):
-              print("Polling inbox for OTP verification code using smart check...")
-              for attempt in range(35):
+              for attempt in range(40):
                   try:
                       res = requests.get(f"{API_BASE}/emails/{uuid}")
                       data = res.json()
-                      
                       if data.get("status") == "success":
                           messages = data["data"].get("messages", [])
                           for msg in messages:
                               body = msg.get("text_body", "") or msg.get("html_body", "")
                               match = re.search(r'\b\d{6}\b', body)
                               if match:
-                                  otp_code = match.group(0)
-                                  print(f"Found OTP code: {otp_code}")
-                                  return otp_code
-                  except Exception as e:
-                      print(f"Polling attempt {attempt+1} exception: {e}")
-                  
-                  time.sleep(4)
-              raise Exception("OTP email was not received within the timeout period.")
+                                  return match.group(0)
+                  except Exception:
+                      pass
+                  time.sleep(5)
+              raise Exception("OTP email timeout.")
 
-          def generate_single_key(index, total):
-              print(f"\n--- Starting generation for account {index} of {total} ---")
-              target_email, email_uuid = get_edu_email()
-              print(f"Acquired email: {target_email}")
+          def generate_single_key(index):
+              print(f"[Worker {index}] Starting account generation...")
+              try:
+                  target_email, email_uuid = get_edu_email()
+                  
+                  first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat", "Logan", "Riley", "Avery"]
+                  last_names = ["Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson", "Moore", "Anderson", "Thomas"]
+                  random_first = random.choice(first_names)
+                  random_last = random.choice(last_names)
+                  
+                  org_prefixes = ["Quantum", "Vortex", "Nebula", "Synapse", "Zenith", "Apex", "Titan", "Pioneer", "Echo", "Helix"]
+                  org_suffixes = ["Dynamics", "Labs", "Technologies", "AI", "Ventures", "Systems", "Networks", "Innovations", "Studios", "Works"]
+                  random_org = f"{random.choice(org_prefixes)} {random.choice(org_suffixes)} {random.randint(1000, 9999)}"
 
-              first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat", "Logan", "Riley", "Avery"]
-              last_names = ["Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson", "Moore", "Anderson", "Thomas"]
-              random_first = random.choice(first_names)
-              random_last = random.choice(last_names)
-              
-              org_prefixes = ["Quantum", "Vortex", "Nebula", "Synapse", "Zenith", "Apex", "Titan", "Pioneer", "Echo", "Helix"]
-              org_suffixes = ["Dynamics", "Labs", "Technologies", "AI", "Ventures", "Systems", "Networks", "Innovations", "Studios", "Works"]
-              random_org = f"{random.choice(org_prefixes)} {random.choice(org_suffixes)} {random.randint(1000, 9999)}"
-
-              api_key_value = None
-
-              with Camoufox(headless=False, humanize=True) as browser:
-                  page = browser.new_page()
-                  page.goto("https://v2.auth.mistral.ai/login", timeout=60000)
-                  
-                  # 1. Fill email
-                  email_selector = "input[name='email']"
-                  page.wait_for_selector(email_selector, state="visible", timeout=15000)
-                  page.fill(email_selector, target_email)
-                  
-                  # 2. Click Continue
-                  continue_btn = "button:has-text('Continue')"
-                  page.wait_for_selector(continue_btn, state="visible", timeout=10000)
-                  page.click(continue_btn)
-                  
-                  # 3. Fill details
-                  password_selector = "input[name='password']"
-                  page.wait_for_selector(password_selector, state="visible", timeout=15000)
-                  page.fill(password_selector, "Shawon123@")
-                  page.fill("input[name='firstName']", random_first)
-                  page.fill("input[name='lastName']", random_last)
-                  
-                  # 4. Signup
-                  signup_btn = "button[type='submit']:has-text('Signup')"
-                  page.wait_for_selector(signup_btn, state="visible", timeout=10000)
-                  page.click(signup_btn)
-                  
-                  # 5. OTP Screen & Fetch
-                  otp_selector = "input[data-input-otp='true']"
-                  page.wait_for_selector(otp_selector, state="visible", timeout=15000)
-                  
-                  otp_code = fetch_otp(email_uuid)
-                  page.fill(otp_selector, otp_code)
-                  
-                  # 6. Wait verification
-                  page.wait_for_selector("text=Email successfully verified", state="visible", timeout=25000)
-                  print("Email verified successfully!")
-                  
-                  # 7. Admin Dashboard & Organization Setup
-                  page.goto("https://admin.mistral.ai/", timeout=60000)
-                  
-                  org_input = "input[name='name']"
-                  page.wait_for_selector(org_input, state="visible", timeout=20000)
-                  page.fill(org_input, random_org)
-                  
-                  terms_checkbox = "input[name='terms']"
-                  page.wait_for_selector(terms_checkbox, state="attached", timeout=10000)
-                  page.click(terms_checkbox, force=True)
-                  
-                  create_org_btn = "button[type='submit']:has-text('Create organization')"
-                  page.wait_for_selector(create_org_btn, state="visible", timeout=10000)
-                  page.click(create_org_btn)
-                  
-                  # 8. Create API Key
-                  page.goto("https://admin.mistral.ai/organization/api-keys", timeout=60000)
-                  
-                  new_key_btn = "button:has-text('New key')"
-                  page.wait_for_selector(new_key_btn, state="visible", timeout=15000)
-                  page.click(new_key_btn)
-                  
-                  workspace_combobox = "button[role='combobox']:has-text('Select workspace')"
-                  page.wait_for_selector(workspace_combobox, state="visible", timeout=10000)
-                  page.click(workspace_combobox)
-                  
-                  workspace_option = "div[role='option']:has-text('Default'), [role='menuitem']:has-text('Default')"
-                  page.wait_for_selector(workspace_option, state="visible", timeout=5000)
-                  page.click(workspace_option)
-                  
-                  modal_submit = "div[role='dialog'] button[type='submit']:has-text('New key')"
-                  page.wait_for_selector(modal_submit, state="visible", timeout=10000)
-                  page.click(modal_submit)
-                  
-                  # 9. Extract API Key
-                  api_key_input = "div[role='dialog'] input[readonly]"
-                  page.wait_for_selector(api_key_input, state="visible", timeout=15000)
-                  api_key_value = page.input_value(api_key_input)
-                  print(f"Successfully extracted API Key for account {index}!")
-                  
-                  done_btn = "div[role='dialog'] button:has-text('Done')"
-                  page.wait_for_selector(done_btn, state="visible", timeout=10000)
-                  page.click(done_btn)
-
-              return target_email, api_key_value
+                  with Camoufox(headless=False, humanize=True) as browser:
+                      page = browser.new_page()
+                      page.goto("https://v2.auth.mistral.ai/login", timeout=60000)
+                      
+                      # 1. Fill email
+                      page.wait_for_selector("input[name='email']", state="visible", timeout=20000)
+                      page.fill("input[name='email']", target_email)
+                      
+                      # 2. Continue
+                      page.wait_for_selector("button:has-text('Continue')", state="visible", timeout=15000)
+                      page.click("button:has-text('Continue')")
+                      
+                      # 3. Details
+                      page.wait_for_selector("input[name='password']", state="visible", timeout=20000)
+                      page.fill("input[name='password']", "Shawon123@")
+                      page.fill("input[name='firstName']", random_first)
+                      page.fill("input[name='lastName']", random_last)
+                      
+                      # 4. Signup
+                      page.wait_for_selector("button[type='submit']:has-text('Signup')", state="visible", timeout=15000)
+                      page.click("button[type='submit']:has-text('Signup')")
+                      
+                      # 5. OTP
+                      page.wait_for_selector("input[data-input-otp='true']", state="visible", timeout=20000)
+                      otp_code = fetch_otp(email_uuid)
+                      page.fill("input[data-input-otp='true']", otp_code)
+                      
+                      # 6. Verify confirmation
+                      page.wait_for_selector("text=Email successfully verified", state="visible", timeout=30000)
+                      
+                      # 7. Admin Dashboard & Org Setup
+                      page.goto("https://admin.mistral.ai/", timeout=60000)
+                      page.wait_for_selector("input[name='name']", state="visible", timeout=25000)
+                      page.fill("input[name='name']", random_org)
+                      page.wait_for_selector("input[name='terms']", state="attached", timeout=15000)
+                      page.click("input[name='terms']", force=True)
+                      page.wait_for_selector("button[type='submit']:has-text('Create organization')", state="visible", timeout=15000)
+                      page.click("button[type='submit']:has-text('Create organization')")
+                      
+                      # 8. Create API Key
+                      page.goto("https://admin.mistral.ai/organization/api-keys", timeout=60000)
+                      page.wait_for_selector("button:has-text('New key')", state="visible", timeout=20000)
+                      page.click("button:has-text('New key')")
+                      
+                      page.wait_for_selector("button[role='combobox']:has-text('Select workspace')", state="visible", timeout=15000)
+                      page.click("button[role='combobox']:has-text('Select workspace')")
+                      page.wait_for_selector("div[role='option']:has-text('Default'), [role='menuitem']:has-text('Default')", state="visible", timeout=10000)
+                      page.click("div[role='option']:has-text('Default'), [role='menuitem']:has-text('Default')")
+                      
+                      page.wait_for_selector("div[role='dialog'] button[type='submit']:has-text('New key')", state="visible", timeout=15000)
+                      page.click("div[role='dialog'] button[type='submit']:has-text('New key')")
+                      
+                      # 9. Extract Key
+                      page.wait_for_selector("div[role='dialog'] input[readonly]", state="visible", timeout=20000)
+                      api_key_value = page.input_value("div[role='dialog'] input[readonly]")
+                      
+                      page.wait_for_selector("div[role='dialog'] button:has-text('Done')", state="visible", timeout=10000)
+                      page.click("div[role='dialog'] button:has-text('Done')")
+                      
+                      print(f"[Worker {index}] Successfully generated API Key!")
+                      return target_email, api_key_value
+              except Exception as e:
+                  print(f"[Worker {index}] Error: {e}")
+                  return None, None
 
           def main():
-              total_count = int(os.environ.get("INPUT_COUNT", "3"))
-              os.makedirs("bulk_output", exist_ok=True)
+              total_count = int(os.environ.get("INPUT_COUNT", "5"))
+              max_workers = int(os.environ.get("INPUT_PARALLEL", "5"))
               
-              all_results = []
+              output_dir = os.path.abspath("bulk_output")
+              os.makedirs(output_dir, exist_ok=True)
+              file_path = os.path.join(output_dir, "bulk_api_keys.txt")
               
-              for i in range(1, total_count + 1):
-                  try:
-                      email, key = generate_single_key(i, total_count)
-                      all_results.append(f"Email: {email} | API Key: {key}\n")
-                      
-                      # Append incrementally to bulk file
-                      with open("bulk_output/bulk_api_keys.txt", "a") as f:
-                          f.write(f"Email: {email}\nAPI Key: {key}\n{'-'*50}\n")
-                          
-                  except Exception as e:
-                      print(f"Error during account generation {i}: {e}")
-                      continue
+              print(f"Running parallel generation for {total_count} accounts using {max_workers} concurrent workers...")
+              
+              successful_count = 0
+              with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                  futures = [executor.submit(generate_single_key, i) for i in range(1, total_count + 1)]
+                  
+                  for future in as_completed(futures):
+                      email, key = future.result()
+                      if email and key:
+                          with open(file_path, "a", encoding="utf-8") as f:
+                              f.write(f"Email: {email}\nAPI Key: {key}\n{'-'*50}\n")
+                          successful_count += 1
 
-              print(f"Bulk generation finished. Total successful: {len(all_results)}/{total_count}")
+              print(f"Parallel bulk generation complete. Total successful: {successful_count}/{total_count}")
 
           if __name__ == "__main__":
               main()
           EOF
 
-      - name: Run Bulk Camoufox Script inside Xvfb
+      - name: Run Parallel Script inside Xvfb
         env:
           INPUT_COUNT: ${{ github.event.inputs.count }}
+          INPUT_PARALLEL: ${{ github.event.inputs.parallel }}
         run: |
-          xvfb-run --server-args="-screen 0 1920x1080x24" python run_bulk_mistral.py
+          xvfb-run --server-args="-screen 0 1920x1080x24" python run_parallel_mistral.py
 
       - name: Upload Bulk API Keys Artifact
         uses: actions/upload-artifact@v4
