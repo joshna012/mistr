@@ -210,7 +210,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          touch bulk_api_keys.txt
           git add bulk_api_keys.txt
-          git status
           git commit -m "chore: auto-generate bulk mistral api keys" || echo "No changes to commit"
           git push
