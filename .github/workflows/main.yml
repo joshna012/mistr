@@ -97,16 +97,17 @@ jobs:
 
           def generate_single_key(index):
               print(f"[Worker {index}] Starting account generation...")
+              page = None
               try:
                   target_email, email_uuid = get_edu_email()
                   
-                  first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat", "Logan", "Riley", "Avery"]
-                  last_names = ["Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson", "Moore", "Anderson", "Thomas"]
+                  first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat"]
+                  last_names = ["Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson"]
                   random_first = random.choice(first_names)
                   random_last = random.choice(last_names)
                   
-                  org_prefixes = ["Quantum", "Vortex", "Nebula", "Synapse", "Zenith", "Apex", "Titan", "Pioneer", "Echo", "Helix"]
-                  org_suffixes = ["Dynamics", "Labs", "Technologies", "AI", "Ventures", "Systems", "Networks", "Innovations", "Studios", "Works"]
+                  org_prefixes = ["Quantum", "Vortex", "Nebula", "Synapse", "Zenith", "Apex"]
+                  org_suffixes = ["Dynamics", "Labs", "Technologies", "AI", "Ventures", "Systems"]
                   random_org = f"{random.choice(org_prefixes)} {random.choice(org_suffixes)} {random.randint(1000, 9999)}"
 
                   with Camoufox(headless=False, humanize=True) as browser:
@@ -170,8 +171,15 @@ jobs:
                       
                       print(f"[Worker {index}] Successfully generated API Key!")
                       return target_email, api_key_value
+
               except Exception as e:
-                  print(f"[Worker {index}] Error: {e}")
+                  print(f"[Worker {index}] Failed with error: {e}")
+                  if page:
+                      try:
+                          page.screenshot(path=f"error_worker_{index}.png")
+                          print(f"[Worker {index}] Saved error screenshot.")
+                      except:
+                          pass
                   return None, None
 
           def main():
@@ -179,21 +187,24 @@ jobs:
               max_workers = int(os.environ.get("INPUT_PARALLEL", "5"))
               
               file_path = "bulk_api_keys.txt"
-              
               print(f"Running parallel generation for {total_count} accounts using {max_workers} concurrent workers...")
               
-              successful_count = 0
+              successful_keys = []
+              
               with ThreadPoolExecutor(max_workers=max_workers) as executor:
                   futures = [executor.submit(generate_single_key, i) for i in range(1, total_count + 1)]
-                  
                   for future in as_completed(futures):
                       email, key = future.result()
                       if email and key:
-                          with open(file_path, "a", encoding="utf-8") as f:
-                              f.write(f"Email: {email}\nAPI Key: {key}\n{'-'*50}\n")
-                          successful_count += 1
+                          successful_keys.append((email, key))
 
-              print(f"Parallel bulk generation complete. Total successful: {successful_count}/{total_count}")
+              if successful_keys:
+                  print(f"Writing {len(successful_keys)} successful keys to file...")
+                  with open(file_path, "a", encoding="utf-8") as f:
+                      for email, key in successful_keys:
+                          f.write(f"Email: {email}\nAPI Key: {key}\n{'-'*50}\n")
+              else:
+                  print("No keys were successfully generated.")
 
           if __name__ == "__main__":
               main()
@@ -206,11 +217,23 @@ jobs:
         run: |
           xvfb-run --server-args="-screen 0 1920x1080x24" python run_parallel_mistral.py
 
+      - name: Upload Error Screenshots (If Any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mistral-error-screenshots
+          path: error_worker_*.png
+          if-no-files-found: ignore
+
       - name: Commit and Push bulk_api_keys.txt to repository root
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          touch bulk_api_keys.txt
-          git add bulk_api_keys.txt
-          git commit -m "chore: auto-generate bulk mistral api keys" || echo "No changes to commit"
-          git push
+          if [ -s bulk_api_keys.txt ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add bulk_api_keys.txt
+            git commit -m "chore: auto-generate bulk mistral api keys" || echo "No changes to commit"
+            git push
+            echo "Successfully pushed keys to repo."
+          else
+            echo "File bulk_api_keys.txt is empty or missing. Skipping git commit."
+          fi
