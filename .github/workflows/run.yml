@@ -1,0 +1,58 @@
+name: Run Mistral API Key Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Total number of accounts/API keys to generate'
+        required: false
+        default: '1'
+        type: string
+      workers:
+        description: 'Number of parallel browser workers'
+        required: false
+        default: '1'
+        type: string
+      alias:
+        description: 'Optional custom email alias'
+        required: false
+        type: string
+      domain_id:
+        description: 'Optional domain ID'
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  run-automation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install Chrome for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Run multi-worker automation script
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node run.js "${{ github.event.inputs.count || '1' }}" "${{ github.event.inputs.workers || '1' }}" "${{ github.event.inputs.alias }}" "${{ github.event.inputs.domain_id }}"
+
+      - name: Upload Generated API Keys Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-keys
+          path: api_keys.txt
+          retention-days: 7
