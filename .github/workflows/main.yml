@@ -174,17 +174,37 @@ jobs:
               signup_btn = page.get_by_role("button", name="Signup")
               signup_btn.wait_for(state="visible", timeout=30000)
               signup_btn.click()
+              page.wait_for_load_state("networkidle")
+              print("URL after signup:", page.url)
+              # Diagnostic screenshot of whatever screen followed Signup.
+              page.screenshot(path="after_signup.png", full_page=True)
 
               # 4) Wait for the OTP screen, fetch the code, and type it in.
+              # The input-otp widget renders a visually hidden <input>, so wait
+              # for it to be ATTACHED (not "visible") and interact with force.
               otp_field = page.locator("input[data-input-otp='true']")
-              otp_field.wait_for(state="visible", timeout=30000)
+              try:
+                  otp_field.wait_for(state="attached", timeout=60000)
+              except Exception:
+                  # Fall back to the "Check your inbox" heading as the signal.
+                  page.get_by_text("Check your inbox").wait_for(
+                      state="visible", timeout=60000)
               print("OTP screen reached, waiting for the code...")
 
               otp = fetch_otp(EMAIL_UUID)
               print("Got OTP:", otp)
 
-              otp_field.click()
-              otp_field.fill(otp)
+              # Click the visible OTP boxes area to focus the hidden input, then
+              # type the digits (force bypasses the visibility check).
+              try:
+                  otp_field.click(force=True)
+              except Exception as exc:
+                  print("Could not click OTP input directly:", exc)
+              otp_field.fill(otp, force=True)
+              # Fallback: if fill did not register, type digit by digit.
+              if otp_field.input_value() != otp:
+                  otp_field.fill("", force=True)
+                  otp_field.type(otp, delay=100)
               # The form auto-submits when all 6 digits are entered; press Enter as a fallback.
               otp_field.press("Enter")
 
@@ -289,9 +309,12 @@ jobs:
             echo "mistral_api_key.txt not found; skipping commit."
           fi
 
-      - name: Upload screenshot
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mistral-result-screenshot
-          path: mistral_result.png
+          name: mistral-result-screenshots
+          path: |
+            mistral_result.png
+            after_signup.png
+          if-no-files-found: ignore
