@@ -3,237 +3,568 @@ name: Camoufox Mistral Parallel Bulk API Key Generator
 on:
   workflow_dispatch:
     inputs:
-      count:
-        description: 'Total number of accounts/API keys to generate'
+      api_count:
+        description: 'Number of API keys to generate'
+        required: true
+        default: '10'
+      workers:
+        description: 'Number of parallel workers/browsers'
         required: true
         default: '5'
-        type: string
-      parallel:
-        description: 'Number of parallel workers (browsers)'
-        required: true
-        default: '5'
-        type: string
-
-permissions:
-  contents: write
 
 jobs:
-  run-parallel-bulk:
+  camoufox-parallel-bulk-api-keys:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install system dependencies & Xvfb
+      
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0 libdbus-glib-1-2 libxt6
-
+          sudo apt-get install -y \
+            firefox \
+            xvfb \
+            libx11-dev \
+            libxcomposite-dev \
+            libxdamage-dev \
+            libxrandr-dev \
+            libxtst-dev
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip
           pip install camoufox playwright requests
-          camoufox fetch
-
-      - name: Create Parallel Python automation script
+          playwright install firefox
+      
+      - name: Create parallel bulk API key generator script
         run: |
-          cat << 'EOF' > run_parallel_mistral.py
+          cat > parallel_bulk_api_key_generator.py << 'EOFPYTHON'
+          import asyncio
           import os
           import random
+          import json
+          import requests
           import re
           import time
-          import requests
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from camoufox.sync_api import Camoufox
-
-          API_BASE = "https://api.edu-mails.com/api"
-
-          def get_edu_email():
-              res = requests.get(f"{API_BASE}/domains")
-              data = res.json()
-              if data.get("status") != "success" or not data["data"]["domains"]:
-                  raise Exception(f"Failed to fetch domains: {data}")
+          from datetime import datetime
+          from camoufox.sync_api import sync_playwright
+          from collections import deque
+          
+          EDUMAIL_API_BASE = "https://api.edu-mails.com/api"
+          
+          FIRST_NAMES = ["James", "Mary", "Robert", "Patricia", "Michael", "Jennifer",
+                        "William", "Linda", "David", "Barbara", "Richard", "Susan",
+                        "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen",
+                        "Christopher", "Nancy", "Daniel", "Lisa", "Matthew", "Betty",
+                        "Anthony", "Margaret", "Mark", "Sandra", "Donald", "Ashley",
+                        "Steven", "Kimberly", "Paul", "Emily", "Andrew", "Donna"]
+          
+          LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia",
+                       "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez",
+                       "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore",
+                       "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
+                       "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson",
+                       "Walker", "Young", "Allen", "King", "Wright", "Scott"]
+          
+          UNCOMMON_ORG_NAMES = [
+              "Zenith Quantum Labs", "Nebula Dynamics Corp", "Prism Analytics Group",
+              "Vertex Innovations Ltd", "Catalyst Ventures Inc", "Axiom Digital Solutions",
+              "Luminous Tech Collective", "Synapse Intelligence Hub", "Apex Paradigm Systems",
+              "Helix Innovations Studio", "Quantum Forge Industries", "Stellar Nexus Technologies",
+              "Velocity Collective Labs", "Horizon Digital Ventures", "Nexus Quantum Dynamics",
+              "Pinnacle Systems Group", "Radiant Innovation Labs", "Spectrum Digital Ventures",
+              "Titan Analytics Solutions", "Vortex Technologies Inc", "Wavelength Dynamics Corp",
+              "Xenith Digital Studios", "Zephyr Innovation Labs", "Arcane Tech Solutions",
+              "Blaze Quantum Systems", "Cipher Innovations Group", "Dynamo Research Labs",
+              "Epoch Digital Systems", "Forge Innovation Labs", "Gravity Analytics Corp"
+          ]
+          
+          API_KEY_NAMES = [
+              "Production API", "Development Key", "Testing Key", "Integration Key",
+              "Automation Key", "Staging API", "Analytics Key", "Data Pipeline",
+              "ML Pipeline", "Service Key", "Worker API", "Batch Processing",
+              "Real-time API", "Webhook Handler", "Sync Service"
+          ]
+          
+          class EduMailsAPI:
+              def __init__(self):
+                  self.base_url = EDUMAIL_API_BASE
+                  self.email_uuid = None
+                  self.email_address = None
               
-              domain = data["data"]["domains"][0]
-              domain_id = domain["id"]
-              alias = f"user{random.randint(100000, 999999)}"
-              
-              payload = {
-                  "action": "custom",
-                  "alias": alias,
-                  "domain_id": domain_id
-              }
-              gen_res = requests.post(f"{API_BASE}/emails/generate", json=payload)
-              gen_data = gen_res.json()
-              
-              if gen_data.get("status") != "success":
-                  raise Exception(f"Failed to generate email: {gen_data}")
-              
-              email_info = gen_data["data"]["email"]
-              return email_info["address"], email_info["uuid"]
-
-          def fetch_otp(uuid):
-              for attempt in range(40):
+              def get_domains(self):
                   try:
-                      res = requests.get(f"{API_BASE}/emails/{uuid}")
-                      data = res.json()
+                      response = requests.get(f"{self.base_url}/domains", timeout=10)
+                      response.raise_for_status()
+                      data = response.json()
                       if data.get("status") == "success":
-                          messages = data["data"].get("messages", [])
-                          for msg in messages:
-                              body = msg.get("text_body", "") or msg.get("html_body", "")
-                              match = re.search(r'\b\d{6}\b', body)
-                              if match:
-                                  return match.group(0)
-                  except Exception:
+                          return data.get("data", {}).get("domains", [])
+                  except Exception as e:
                       pass
-                  time.sleep(5)
-              raise Exception("OTP email timeout.")
-
-          def generate_single_key(index):
-              print(f"[Worker {index}] Starting account generation...")
-              page = None
+                  return []
+              
+              def generate_email(self, alias=None, domain_id=None):
+                  try:
+                      if alias and domain_id:
+                          payload = {"action": "custom", "alias": alias, "domain_id": domain_id}
+                      else:
+                          payload = {"action": "random"}
+                      
+                      response = requests.post(f"{self.base_url}/emails/generate", json=payload, timeout=10)
+                      response.raise_for_status()
+                      data = response.json()
+                      
+                      if data.get("status") == "success":
+                          email_data = data.get("data", {}).get("email", {})
+                          self.email_uuid = email_data.get("uuid")
+                          self.email_address = email_data.get("address")
+                          return self.email_address, self.email_uuid
+                  except Exception as e:
+                      pass
+                  return None, None
+              
+              def fetch_messages(self):
+                  if not self.email_uuid:
+                      return []
+                  try:
+                      response = requests.get(f"{self.base_url}/emails/{self.email_uuid}", timeout=10)
+                      response.raise_for_status()
+                      data = response.json()
+                      if data.get("status") == "success":
+                          return data.get("data", {}).get("messages", [])
+                  except Exception as e:
+                      pass
+                  return []
+              
+              def extract_otp(self, max_attempts=60, wait_seconds=1):
+                  for attempt in range(max_attempts):
+                      messages = self.fetch_messages()
+                      for message in messages:
+                          text_body = message.get("text_body", "")
+                          html_body = message.get("html_body", "")
+                          otp_match = re.search(r'\b(\d{6})\b', text_body + html_body)
+                          if otp_match:
+                              return otp_match.group(1)
+                      
+                      if attempt < max_attempts - 1:
+                          time.sleep(wait_seconds)
+                  
+                  return None
+          
+          async def wait_for_element_visible(page, selector, timeout=15000):
               try:
-                  target_email, email_uuid = get_edu_email()
+                  await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                  return True
+              except:
+                  return False
+          
+          async def wait_for_navigation_complete(page, timeout=20000):
+              try:
+                  await page.wait_for_load_state('networkidle', timeout=timeout)
+                  return True
+              except:
+                  return False
+          
+          async def wait_for_url_change(page, target_pattern, timeout=30000):
+              try:
+                  await page.wait_for_url(target_pattern, timeout=timeout)
+                  return True
+              except:
+                  return False
+          
+          async def generate_single_api_key(page, email, password, first_name, last_name, org_name, api_key_name, edumail, account_num, worker_id):
+              """Generate a single API key"""
+              
+              prefix = f"[W{worker_id}|A{account_num}]"
+              
+              credentials = {
+                  "account_num": account_num,
+                  "worker_id": worker_id,
+                  "email": email,
+                  "password": password,
+                  "first_name": first_name,
+                  "last_name": last_name,
+                  "organization_name": org_name,
+                  "api_key_name": api_key_name,
+                  "api_key": None,
+                  "otp": None,
+                  "status": "pending",
+                  "created_at": datetime.now().isoformat()
+              }
+              
+              try:
+                  print(f"{prefix} Starting signup...")
+                  await page.goto("https://v2.auth.mistral.ai/login", wait_until="domcontentloaded")
                   
-                  first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Chris", "Pat"]
-                  last_names = ["Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson"]
-                  random_first = random.choice(first_names)
-                  random_last = random.choice(last_names)
+                  if not await wait_for_element_visible(page, 'input[name="email"]'):
+                      print(f"{prefix} ❌ Email input not found")
+                      return None
                   
-                  org_prefixes = ["Quantum", "Vortex", "Nebula", "Synapse", "Zenith", "Apex"]
-                  org_suffixes = ["Dynamics", "Labs", "Technologies", "AI", "Ventures", "Systems"]
-                  random_org = f"{random.choice(org_prefixes)} {random.choice(org_suffixes)} {random.randint(1000, 9999)}"
-
-                  with Camoufox(headless=False, humanize=True) as browser:
-                      page = browser.new_page()
-                      page.goto("https://v2.auth.mistral.ai/login", timeout=60000)
-                      
-                      # 1. Fill email
-                      page.wait_for_selector("input[name='email']", state="visible", timeout=20000)
-                      page.fill("input[name='email']", target_email)
-                      
-                      # 2. Continue
-                      page.wait_for_selector("button:has-text('Continue')", state="visible", timeout=15000)
-                      page.click("button:has-text('Continue')")
-                      
-                      # 3. Details
-                      page.wait_for_selector("input[name='password']", state="visible", timeout=20000)
-                      page.fill("input[name='password']", "Shawon123@")
-                      page.fill("input[name='firstName']", random_first)
-                      page.fill("input[name='lastName']", random_last)
-                      
-                      # 4. Signup
-                      page.wait_for_selector("button[type='submit']:has-text('Signup')", state="visible", timeout=15000)
-                      page.click("button[type='submit']:has-text('Signup')")
-                      
-                      # 5. OTP
-                      page.wait_for_selector("input[data-input-otp='true']", state="visible", timeout=20000)
-                      otp_code = fetch_otp(email_uuid)
-                      page.fill("input[data-input-otp='true']", otp_code)
-                      
-                      # 6. Verify confirmation
-                      page.wait_for_selector("text=Email successfully verified", state="visible", timeout=30000)
-                      
-                      # 7. Admin Dashboard & Org Setup
-                      page.goto("https://admin.mistral.ai/", timeout=60000)
-                      page.wait_for_selector("input[name='name']", state="visible", timeout=25000)
-                      page.fill("input[name='name']", random_org)
-                      page.wait_for_selector("input[name='terms']", state="attached", timeout=15000)
-                      page.click("input[name='terms']", force=True)
-                      page.wait_for_selector("button[type='submit']:has-text('Create organization')", state="visible", timeout=15000)
-                      page.click("button[type='submit']:has-text('Create organization')")
-                      
-                      # 8. Create API Key
-                      page.goto("https://admin.mistral.ai/organization/api-keys", timeout=60000)
-                      page.wait_for_selector("button:has-text('New key')", state="visible", timeout=20000)
-                      page.click("button:has-text('New key')")
-                      
-                      page.wait_for_selector("button[role='combobox']:has-text('Select workspace')", state="visible", timeout=15000)
-                      page.click("button[role='combobox']:has-text('Select workspace')")
-                      page.wait_for_selector("div[role='option']:has-text('Default'), [role='menuitem']:has-text('Default')", state="visible", timeout=10000)
-                      page.click("div[role='option']:has-text('Default'), [role='menuitem']:has-text('Default')")
-                      
-                      page.wait_for_selector("div[role='dialog'] button[type='submit']:has-text('New key')", state="visible", timeout=15000)
-                      page.click("div[role='dialog'] button[type='submit']:has-text('New key')")
-                      
-                      # 9. Extract Key
-                      page.wait_for_selector("div[role='dialog'] input[readonly]", state="visible", timeout=20000)
-                      api_key_value = page.input_value("div[role='dialog'] input[readonly]")
-                      
-                      page.wait_for_selector("div[role='dialog'] button:has-text('Done')", state="visible", timeout=10000)
-                      page.click("div[role='dialog'] button:has-text('Done')")
-                      
-                      print(f"[Worker {index}] Successfully generated API Key!")
-                      return target_email, api_key_value
-
-              except Exception as e:
-                  print(f"[Worker {index}] Failed with error: {e}")
-                  if page:
+                  await page.fill('input[name="email"]', email)
+                  
+                  continue_button = page.locator('button:has-text("Continue")')
+                  await continue_button.click()
+                  
+                  if not await wait_for_element_visible(page, 'input[name="password"]', 15000):
+                      print(f"{prefix} ❌ Signup form not found")
+                      return None
+                  
+                  await page.fill('input[name="password"]', password)
+                  await page.fill('input[name="firstName"]', first_name)
+                  await page.fill('input[name="lastName"]', last_name)
+                  
+                  print(f"{prefix} Submitting signup...")
+                  signup_button = page.locator('button:has-text("Signup")')
+                  await signup_button.click()
+                  
+                  if not await wait_for_element_visible(page, 'input[data-input-otp="true"]', 15000):
+                      print(f"{prefix} ❌ OTP page not found")
+                      return None
+                  
+                  print(f"{prefix} Extracting OTP...")
+                  otp_code = edumail.extract_otp()
+                  
+                  if not otp_code:
+                      print(f"{prefix} ❌ OTP extraction failed")
+                      return None
+                  
+                  credentials["otp"] = otp_code
+                  print(f"{prefix} ✓ OTP: {otp_code}")
+                  
+                  otp_input = page.locator('input[data-input-otp="true"]')
+                  await otp_input.focus()
+                  await otp_input.fill(otp_code)
+                  
+                  try:
+                      submit_buttons = page.locator('button[type="submit"]')
+                      if await submit_buttons.count() > 0:
+                          submit_button = submit_buttons.first
+                          if await submit_button.is_visible():
+                              await submit_button.click()
+                  except:
+                      pass
+                  
+                  try:
+                      await page.wait_for_selector('text=Email successfully verified', timeout=15000)
+                  except:
+                      pass
+                  
+                  print(f"{prefix} Creating organization...")
+                  if not await wait_for_url_change(page, '**/admin.mistral.ai/**', 30000):
+                      print(f"{prefix} ⚠️  URL redirect timeout")
+                  
+                  if not await wait_for_navigation_complete(page, 20000):
+                      print(f"{prefix} ⚠️  Dashboard load timeout")
+                  
+                  if not await wait_for_element_visible(page, 'input[name="name"]', 15000):
+                      print(f"{prefix} ❌ Organization form not found")
+                      return None
+                  
+                  await page.fill('input[name="name"]', org_name)
+                  
+                  checkbox = page.locator('input[name="terms"]')
+                  if not await checkbox.is_checked():
+                      await checkbox.click()
+                  
+                  create_org_button = page.locator('button:has-text("Create organization")')
+                  await create_org_button.click()
+                  
+                  if not await wait_for_navigation_complete(page, 20000):
+                      print(f"{prefix} ⚠️  Creation timeout")
+                  
+                  print(f"{prefix} Generating API key...")
+                  await page.goto("https://admin.mistral.ai/organization/api-keys", wait_until="domcontentloaded")
+                  
+                  if not await wait_for_navigation_complete(page, 15000):
+                      print(f"{prefix} ⚠️  Page load timeout")
+                  
+                  new_key_button = page.locator('button:has-text("New key")').first
+                  await new_key_button.click()
+                  
+                  if not await wait_for_element_visible(page, 'input[name="name"]', 10000):
+                      print(f"{prefix} ❌ Modal not found")
+                      return None
+                  
+                  await page.fill('input[name="name"]', api_key_name)
+                  
+                  workspace_button = page.locator('button[role="combobox"]').nth(0)
+                  await workspace_button.click()
+                  
+                  try:
+                      default_option = page.locator('text=default').first
+                      await default_option.click()
+                  except:
+                      first_option = page.locator('[role="menuitem"]').first
                       try:
-                          page.screenshot(path=f"error_worker_{index}.png")
-                          print(f"[Worker {index}] Saved error screenshot.")
+                          await first_option.click()
                       except:
                           pass
-                  return None, None
-
-          def main():
-              total_count = int(os.environ.get("INPUT_COUNT", "5"))
-              max_workers = int(os.environ.get("INPUT_PARALLEL", "5"))
+                  
+                  submit_button = page.locator('button:has-text("New key")').last
+                  await submit_button.click()
+                  
+                  if not await wait_for_navigation_complete(page, 15000):
+                      print(f"{prefix} ⚠️  Creation timeout")
+                  
+                  if not await wait_for_element_visible(page, 'input[readonly]', 10000):
+                      print(f"{prefix} ❌ API key modal not found")
+                      return None
+                  
+                  api_key_input = page.locator('input[readonly]')
+                  api_key_value = await api_key_input.input_value()
+                  
+                  if api_key_value:
+                      print(f"{prefix} ✅ API key captured: {api_key_value[:15]}...")
+                      credentials["api_key"] = api_key_value
+                      credentials["status"] = "success"
+                  else:
+                      print(f"{prefix} ❌ API key extraction failed")
+                      return None
+                  
+                  try:
+                      done_button = page.locator('button:has-text("Done")')
+                      await done_button.click()
+                  except:
+                      pass
+                  
+                  return credentials
+                  
+              except Exception as e:
+                  print(f"{prefix} ❌ Error: {str(e)}")
+                  credentials["status"] = f"error: {str(e)}"
+                  return credentials
+          
+          async def worker(worker_id, task_queue, results, domains, domain):
+              """Worker that processes tasks from queue"""
               
-              file_path = "bulk_api_keys.txt"
-              print(f"Running parallel generation for {total_count} accounts using {max_workers} concurrent workers...")
+              async with sync_playwright() as p:
+                  browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+                  page = await browser.new_page()
+                  
+                  while True:
+                      try:
+                          task = task_queue.popleft()
+                      except IndexError:
+                          break
+                      
+                      account_num, _ = task
+                      
+                      # Generate random data
+                      first_name = random.choice(FIRST_NAMES)
+                      last_name = random.choice(LAST_NAMES)
+                      org_name = random.choice(UNCOMMON_ORG_NAMES)
+                      api_key_name = random.choice(API_KEY_NAMES)
+                      password = "Shawon123@"
+                      
+                      # Generate email
+                      edumail_master = EduMailsAPI()
+                      alias = f"student{random.randint(100000, 999999)}"
+                      email, email_uuid = edumail_master.generate_email(alias=alias, domain_id=domain['id'])
+                      
+                      if not email:
+                          print(f"[W{worker_id}|A{account_num}] ❌ Email generation failed")
+                          results.append({
+                              "account_num": account_num,
+                              "worker_id": worker_id,
+                              "status": "email_generation_failed"
+                          })
+                          continue
+                      
+                      # Create new EduMails instance for this email
+                      edumail = EduMailsAPI()
+                      edumail.email_uuid = email_uuid
+                      edumail.email_address = email
+                      
+                      print(f"[W{worker_id}|A{account_num}] Email: {email}")
+                      
+                      # Generate API key
+                      credentials = await generate_single_api_key(
+                          page, email, password, first_name, last_name,
+                          org_name, api_key_name, edumail, account_num, worker_id
+                      )
+                      
+                      if credentials:
+                          results.append(credentials)
+                  
+                  await browser.close()
+          
+          async def main():
+              api_count = int(os.getenv('API_COUNT', '10'))
+              num_workers = int(os.getenv('NUM_WORKERS', '5'))
               
-              successful_keys = []
+              print(f"\n{'='*70}")
+              print(f"🚀 MISTRAL PARALLEL BULK API KEY GENERATOR")
+              print(f"{'='*70}")
+              print(f"📊 API Keys to generate: {api_count}")
+              print(f"⚙️  Parallel workers: {num_workers}")
+              print(f"{'='*70}\n")
               
-              with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                  futures = [executor.submit(generate_single_key, i) for i in range(1, total_count + 1)]
-                  for future in as_completed(futures):
-                      email, key = future.result()
-                      if email and key:
-                          successful_keys.append((email, key))
-
-              if successful_keys:
-                  print(f"Writing {len(successful_keys)} successful keys to file...")
-                  with open(file_path, "a", encoding="utf-8") as f:
-                      for email, key in successful_keys:
-                          f.write(f"Email: {email}\nAPI Key: {key}\n{'-'*50}\n")
-              else:
-                  print("No keys were successfully generated.")
-
+              # Initialize EduMails
+              print(f"📧 Initializing EduMails API...")
+              edumail_master = EduMailsAPI()
+              
+              domains = edumail_master.get_domains()
+              if not domains:
+                  print("❌ No domains available")
+                  return
+              
+              domain = domains[0]
+              print(f"✓ Using domain: {domain['name']}\n")
+              
+              # Create task queue
+              task_queue = deque()
+              for i in range(1, api_count + 1):
+                  task_queue.append((i, None))
+              
+              # Results list
+              results = []
+              
+              # Create and run workers
+              print(f"🔄 Starting {num_workers} workers...\n")
+              start_time = time.time()
+              
+              workers = [
+                  worker(i, task_queue, results, domains, domain)
+                  for i in range(1, num_workers + 1)
+              ]
+              
+              await asyncio.gather(*workers)
+              
+              elapsed_time = time.time() - start_time
+              
+              # ==================== SAVE RESULTS ====================
+              print(f"\n\n{'='*70}")
+              print(f"💾 SAVING RESULTS")
+              print(f"{'='*70}\n")
+              
+              # Sort results by account number
+              results.sort(key=lambda x: x.get('account_num', 0))
+              
+              # Save all credentials as JSON
+              with open('bulk_api_keys.json', 'w') as f:
+                  json.dump(results, f, indent=2)
+              print(f"✓ Saved: bulk_api_keys.json")
+              
+              # Save API keys in a simple text file
+              with open('api_keys.txt', 'w') as f:
+                  f.write("=" * 70 + "\n")
+                  f.write("MISTRAL AI BULK API KEYS\n")
+                  f.write("=" * 70 + "\n\n")
+                  f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                  f.write(f"Total Keys: {len(results)}\n")
+                  f.write(f"Successful: {sum(1 for c in results if c.get('status') == 'success')}\n")
+                  f.write(f"Workers Used: {num_workers}\n")
+                  f.write(f"Time Taken: {elapsed_time:.2f}s\n\n")
+                  
+                  for idx, cred in enumerate(results, 1):
+                      f.write(f"\n{'='*70}\n")
+                      f.write(f"API KEY #{idx} (Worker {cred.get('worker_id', 'N/A')})\n")
+                      f.write(f"{'='*70}\n")
+                      f.write(f"Email: {cred['email']}\n")
+                      f.write(f"Password: {cred['password']}\n")
+                      f.write(f"Name: {cred['first_name']} {cred['last_name']}\n")
+                      f.write(f"Organization: {cred['organization_name']}\n")
+                      f.write(f"API Key Name: {cred['api_key_name']}\n")
+                      f.write(f"API Key: {cred['api_key']}\n")
+                      f.write(f"OTP: {cred['otp']}\n")
+                      f.write(f"Status: {cred['status']}\n")
+                      f.write(f"Created: {cred['created_at']}\n")
+              
+              print(f"✓ Saved: api_keys.txt")
+              
+              # Save only API keys (one per line)
+              with open('api_keys_only.txt', 'w') as f:
+                  for cred in results:
+                      if cred.get('api_key'):
+                          f.write(f"{cred['api_key']}\n")
+              
+              print(f"✓ Saved: api_keys_only.txt")
+              
+              # Save credentials in CSV format
+              with open('api_keys_credentials.csv', 'w') as f:
+                  f.write("Account#,Worker,Email,Password,First Name,Last Name,Organization,API Key Name,API Key,OTP,Status\n")
+                  for cred in results:
+                      f.write(f"{cred.get('account_num', 'N/A')},{cred.get('worker_id', 'N/A')},{cred['email']},{cred['password']},{cred['first_name']},{cred['last_name']},{cred['organization_name']},{cred['api_key_name']},{cred['api_key']},{cred['otp']},{cred['status']}\n")
+              
+              print(f"✓ Saved: api_keys_credentials.csv")
+              
+              # Print summary
+              print(f"\n{'='*70}")
+              print(f"📊 SUMMARY")
+              print(f"{'='*70}")
+              print(f"Total Generated: {len(results)}")
+              print(f"Successful: {sum(1 for c in results if c.get('status') == 'success')}")
+              print(f"Failed: {sum(1 for c in results if c.get('status') != 'success')}")
+              print(f"Time Taken: {elapsed_time:.2f}s")
+              print(f"Avg Time per Key: {elapsed_time/len(results):.2f}s" if results else "N/A")
+              print(f"Workers Used: {num_workers}")
+              print(f"\n💾 Files saved to repo root:")
+              print(f"  - api_keys.txt (full details)")
+              print(f"  - api_keys_only.txt (keys only, one per line)")
+              print(f"  - api_keys_credentials.csv (CSV format)")
+              print(f"  - bulk_api_keys.json (JSON format)")
+          
           if __name__ == "__main__":
-              main()
-          EOF
-
-      - name: Run Parallel Script inside Xvfb
+              asyncio.run(main())
+          EOFPYTHON
+      
+      - name: Run parallel bulk API key generator
         env:
-          INPUT_COUNT: ${{ github.event.inputs.count }}
-          INPUT_PARALLEL: ${{ github.event.inputs.parallel }}
+          API_COUNT: ${{ github.event.inputs.api_count }}
+          NUM_WORKERS: ${{ github.event.inputs.workers }}
         run: |
-          xvfb-run --server-args="-screen 0 1920x1080x24" python run_parallel_mistral.py
-
-      - name: Upload Error Screenshots (If Any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mistral-error-screenshots
-          path: error_worker_*.png
-          if-no-files-found: ignore
-
-      - name: Commit and Push bulk_api_keys.txt to repository root
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+          sleep 2
+          python parallel_bulk_api_key_generator.py
+      
+      - name: Verify generated files
         run: |
-          if [ -s bulk_api_keys.txt ]; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add bulk_api_keys.txt
-            git commit -m "chore: auto-generate bulk mistral api keys" || echo "No changes to commit"
+          echo "📂 Generated files:"
+          ls -lh api_keys* bulk_api_keys.json 2>/dev/null || echo "No files found"
+          echo ""
+          echo "📋 API Keys generated:"
+          wc -l api_keys_only.txt 2>/dev/null || echo "No keys file"
+          echo ""
+          echo "🔑 Sample keys (first 3):"
+          head -n 3 api_keys_only.txt 2>/dev/null || echo "No keys"
+      
+      - name: Commit and push to repo
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          if [ -f api_keys.txt ]; then
+            git add api_keys.txt api_keys_only.txt api_keys_credentials.csv bulk_api_keys.json
+            KEY_COUNT=$(wc -l < api_keys_only.txt)
+            git commit -m "🔑 Generated $KEY_COUNT API keys ($(date '+%Y-%m-%d %H:%M:%S'))"
             git push
-            echo "Successfully pushed keys to repo."
-          else
-            echo "File bulk_api_keys.txt is empty or missing. Skipping git commit."
+          fi
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: parallel-bulk-api-keys
+          path: |
+            api_keys.txt
+            api_keys_only.txt
+            api_keys_credentials.csv
+            bulk_api_keys.json
+          retention-days: 30
+      
+      - name: Display results
+        if: always()
+        run: |
+          echo "✅ Parallel Bulk API Key Generation Complete!"
+          echo ""
+          if [ -f api_keys.txt ]; then
+            echo "📊 Summary:"
+            head -n 20 api_keys.txt
           fi
