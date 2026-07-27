@@ -39,8 +39,8 @@ jobs:
       
       - name: Install Python dependencies
         run: |
-          pip install camoufox playwright requests
-          playwright install firefox
+          pip install playwright requests
+          playwright install firefox chromium
       
       - name: Create parallel bulk API key generator script
         run: |
@@ -53,7 +53,7 @@ jobs:
           import re
           import time
           from datetime import datetime
-          from camoufox.sync_api import sync_playwright
+          from playwright.async_api import async_playwright
           from collections import deque
           
           EDUMAIL_API_BASE = "https://api.edu-mails.com/api"
@@ -343,7 +343,7 @@ jobs:
           async def worker(worker_id, task_queue, results, domains, domain):
               """Worker that processes tasks from queue"""
               
-              async with sync_playwright() as p:
+              async with async_playwright() as p:
                   browser = await p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
                   page = await browser.new_page()
                   
