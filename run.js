@@ -88,12 +88,15 @@ function getMessageText(m) {
 function extractOtp(messages) {
 	for (const m of messages) {
 		const haystack = getMessageText(m);
+		// 1. Try code=XXXXXX (from URL parameters or text)
 		const codeParamMatch = haystack.match(/code=(\d{6})/i);
 		if (codeParamMatch) return codeParamMatch[1];
 
+		// 2. Try HTML tag 6-digit content e.g. >346601<
 		const htmlMatch = haystack.match(/>(\d{6})</);
 		if (htmlMatch) return htmlMatch[1];
 
+		// 3. Try standalone 6 digits
 		const standaloneMatch = haystack.match(/(?<!\d)\d{6}(?!\d)/);
 		if (standaloneMatch) return standaloneMatch[0];
 	}
@@ -115,6 +118,8 @@ function extractVerificationLink(messages) {
 // ---- EduMails API --------------------------------------------------------
 
 // Generate a temporary edu email.
+// By default uses a random address. Pass a custom alias + domainId to request
+// a specific username on a specific domain.
 async function generateEduEmail({ alias, domainId } = {}) {
 	const body =
 		alias && domainId
@@ -172,238 +177,364 @@ async function waitForMessages(uuid, { timeout = 120000, interval = 5000 } = {})
 	return [];
 }
 
-// ---- Single Account Worker Automation Routine -----------------------------
+// ---- SINGLE TASK RUNNER -------------------------------------------------
 
-async function runSingleAccountAutomation(workerId, accountNum, { alias, domainId, isCI, keepOpen }) {
-	const logPrefix = `[Worker #${workerId} | Account #${accountNum}]`;
+async function runSingleTask(taskId = 1, { cliAlias, cliDomainId } = {}) {
 	let browser;
+	const tag = `[Task #${taskId}]`;
+	const log = (...args) => console.log(tag, ...args);
+	const warn = (...args) => console.warn(tag, ...args);
+	const error = (...args) => console.error(tag, ...args);
 
 	try {
-		console.log(`${logPrefix} Requesting a temporary edu email...`);
-		const { address: EMAIL, uuid } = await generateEduEmail({ alias, domainId });
-		console.log(`${logPrefix} Generated email: ${EMAIL} (UUID: ${uuid})`);
+		// --- STEP 1: GET A TEMPORARY EDU EMAIL FROM THE API ----------------
+		log("Requesting a temporary edu email...");
+		const { address: EMAIL, uuid } = await generateEduEmail({
+			alias: cliAlias,
+			domainId: cliDomainId,
+		});
+		log(`Generated email: ${EMAIL}`);
+		log(`Inbox UUID: ${uuid}`);
 
-		console.log(`${logPrefix} Launching browser...`);
+		// --- STEP 2: LAUNCH BROWSER ----------------------------------------
+		log("Launching browser...");
 		browser = await puppeteer.launch({
-			headless: isCI ? true : false,
-			defaultViewport: isCI ? { width: 1920, height: 1080 } : null,
+			headless: "new", // Modern headless Chrome mode
+			defaultViewport: { width: 1920, height: 1080 },
 			args: [
-				"--start-maximized",
-				"--disable-blink-features=AutomationControlled",
-				"--no-default-browser-check",
-				"--no-first-run",
+				"--window-size=1920,1080",
+				"--disable-blink-features=AutomationControlled", // reduce bot detection
 				"--no-sandbox",
 				"--disable-setuid-sandbox",
-				"--disable-dev-shm-usage",
+				"--no-default-browser-check",
+				"--no-first-run",
 			],
 		});
 
 		const page = await browser.newPage();
+
+		// Set a realistic user agent to avoid being flagged as a bot
 		await page.setUserAgent(
 			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 		);
+
+		// Anti-detection document overrides
 		await page.evaluateOnNewDocument(() => {
 			Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+			Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+			Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
 		});
 
-		console.log(`${logPrefix} Navigating to ${TARGET_URL} ...`);
-		await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 60000 });
+		log(`Navigating to ${TARGET_URL} ...`);
+		await page.goto(TARGET_URL, {
+			waitUntil: "networkidle2",
+			timeout: 60000,
+		});
+		log("Page loaded successfully.");
 
-		console.log(`${logPrefix} Waiting for email field...`);
-		await page.waitForSelector(EMAIL_SELECTOR, { visible: true, timeout: 30000 });
+		// --- STEP 3: SMART DETECTION OF THE EMAIL FIELD --------------------
+		log("Waiting for the email field to appear...");
+		await page.waitForSelector(EMAIL_SELECTOR, {
+			visible: true,
+			timeout: 30000,
+		});
+
+		// Also make sure the field is enabled/ready to receive input.
 		await page.waitForFunction(
 			(sel) => {
 				const el = document.querySelector(sel);
-				return el && !el.disabled && el.getAttribute("aria-disabled") !== "true" && el.offsetParent !== null;
+				return (
+					el &&
+					!el.disabled &&
+					el.getAttribute("aria-disabled") !== "true"
+				);
 			},
 			{ timeout: 30000 },
 			EMAIL_SELECTOR
 		);
+		log("Email field is ready.");
 
-		console.log(`${logPrefix} Entering email: ${EMAIL}`);
+		// --- STEP 4: ENTER THE EMAIL (direct input) ------------------------
+		log(`Entering email directly: ${EMAIL}`);
 		await directInput(page, EMAIL_SELECTOR, EMAIL);
 		await humanPause(200, 500);
+		log("Email entered successfully.");
 
-		console.log(`${logPrefix} Waiting for Continue button...`);
+		// --- STEP 5: CLICK THE "CONTINUE" BUTTON ---------------------------
+		log("Waiting for the Continue button...");
 		await page.waitForFunction(
 			() => {
-				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+				const btns = Array.from(
+					document.querySelectorAll('button[type="submit"]')
+				);
 				return btns.some((b) => {
 					const label = (b.textContent || "").trim().toLowerCase();
-					return label === "continue" && b.offsetParent !== null && !b.disabled && b.getAttribute("aria-disabled") !== "true";
+					const enabled =
+						!b.disabled &&
+						b.getAttribute("aria-disabled") !== "true" &&
+						b.getAttribute("aria-busy") !== "true";
+					return label === "continue" && enabled;
 				});
 			},
 			{ timeout: 30000 }
 		);
 
-		await humanPause(400, 800);
-		const continueBtn = await page.evaluateHandle(() => {
-			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-			return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "continue");
-		});
-		const btnEl = continueBtn.asElement();
-		if (btnEl) await btnEl.click();
-		else await page.keyboard.press("Enter");
+		await humanPause(400, 1000);
 
+		// Focus email selector and trigger submit via Enter & DOM click for headless/minimized reliability
+		await page.evaluate((sel) => {
+			const el = document.querySelector(sel);
+			if (el) el.focus();
+		}, EMAIL_SELECTOR);
+		await page.keyboard.press("Enter");
+		await page.evaluate(() => {
+			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+			const btn = btns.find((b) => (b.textContent || "").trim().toLowerCase() === "continue");
+			if (btn) btn.click();
+		});
+		log("Submitted Continue step.");
+
+		// --- STEP 6: FILL THE SIGNUP FORM ----------------------------------
 		const PASSWORD_SELECTOR = 'input[name="password"]';
 		const FIRST_NAME_SELECTOR = 'input[name="firstName"]';
 		const LAST_NAME_SELECTOR = 'input[name="lastName"]';
 
-		console.log(`${logPrefix} Waiting for signup form fields...`);
-		await page.waitForSelector(PASSWORD_SELECTOR, { visible: true, timeout: 30000 });
-		await page.waitForSelector(FIRST_NAME_SELECTOR, { visible: true, timeout: 30000 });
-		await page.waitForSelector(LAST_NAME_SELECTOR, { visible: true, timeout: 30000 });
+		log("Waiting for the signup fields to appear...");
+		await page.waitForSelector(PASSWORD_SELECTOR, { timeout: 30000 });
+		await page.waitForSelector(FIRST_NAME_SELECTOR, { timeout: 30000 });
+		await page.waitForSelector(LAST_NAME_SELECTOR, { timeout: 30000 });
 
 		const firstName = pick(FIRST_NAMES);
 		const lastName = pick(LAST_NAMES);
-		console.log(`${logPrefix} Using name: ${firstName} ${lastName}`);
+		log(`Using name: ${firstName} ${lastName}`);
 
-		await directInput(page, PASSWORD_SELECTOR, PASSWORD);
-		await directInput(page, FIRST_NAME_SELECTOR, firstName);
-		await directInput(page, LAST_NAME_SELECTOR, lastName);
-		await humanPause(300, 600);
+		// Fill each field human-like, with pauses between them.
+		await humanPause(500, 1200);
+		log("Typing password...");
+		await humanType(page, PASSWORD_SELECTOR, PASSWORD);
 
-		console.log(`${logPrefix} Clicking Signup button...`);
+		await humanPause(400, 900);
+		log("Typing first name...");
+		await humanType(page, FIRST_NAME_SELECTOR, firstName);
+
+		await humanPause(400, 900);
+		log("Typing last name...");
+		await humanType(page, LAST_NAME_SELECTOR, lastName);
+
+		await humanPause(500, 1200);
+
+		// --- STEP 7: CLICK THE "SIGNUP" BUTTON / PRESS ENTER ----------------
+		log("Waiting for the Signup button...");
 		await page.waitForFunction(
 			() => {
-				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+				const btns = Array.from(
+					document.querySelectorAll('button[type="submit"]')
+				);
 				return btns.some((b) => {
 					const label = (b.textContent || "").trim().toLowerCase();
-					return label === "signup" && b.offsetParent !== null && !b.disabled && b.getAttribute("aria-disabled") !== "true";
+					const enabled =
+						!b.disabled &&
+						b.getAttribute("aria-disabled") !== "true" &&
+						b.getAttribute("aria-busy") !== "true";
+					return label === "signup" && enabled;
 				});
 			},
 			{ timeout: 30000 }
 		);
 
-		const signupBtn = await page.evaluateHandle(() => {
+		await humanPause(400, 1000);
+
+		// Focus the last name field & press Enter (works when minimized / off-focus / headless)
+		log("Focusing Last Name input and pressing Enter to submit...");
+		await page.evaluate((sel) => {
+			const el = document.querySelector(sel);
+			if (el) el.focus();
+		}, LAST_NAME_SELECTOR);
+		await page.keyboard.press("Enter");
+
+		// DOM click fallback to ensure submission even if Enter key is intercepted
+		await page.evaluate(() => {
 			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-			return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "signup");
+			const btn = btns.find((b) => (b.textContent || "").trim().toLowerCase() === "signup");
+			if (btn) btn.click();
 		});
-		const signupEl = signupBtn.asElement();
-		if (signupEl) await signupEl.click();
+		log("Submitted the Signup form.");
 
-		const OTP_SELECTOR = 'input[data-input-otp="true"], input[autocomplete="one-time-code"]';
-		console.log(`${logPrefix} Waiting for OTP screen or verification email...`);
+		// --- STEP 8: WAIT FOR OTP FIELD & POLL INBOX FOR VERIFICATION CODE ---
+		const OTP_SELECTOR =
+			'input[data-input-otp="true"], input[autocomplete="one-time-code"]';
+
+		log("Waiting for OTP input screen...");
 		try {
-			await page.waitForSelector(OTP_SELECTOR, { visible: true, timeout: 15000 });
-		} catch (e) {}
+			await page.waitForSelector(OTP_SELECTOR, {
+				visible: true,
+				timeout: 30000,
+			});
+			log("OTP input field detected.");
+		} catch (e) {
+			warn("OTP input field not immediately detected, proceeding to poll inbox...");
+		}
 
-		console.log(`${logPrefix} Polling inbox for verification code/link...`);
-		const messages = await waitForMessages(uuid, { timeout: 120000, interval: 5000 });
+		log("Waiting for the verification email to arrive in the inbox...");
+		const messages = await waitForMessages(uuid, {
+			timeout: 120000, // wait up to 2 minutes
+			interval: 5000, // check every 5 seconds
+		});
 
-		if (messages.length > 0) {
+		if (messages.length === 0) {
+			log("No messages arrived within the timeout window.");
+			log(`You can check later with: GET ${API_BASE}/emails/${uuid}`);
+		} else {
+			log(`Received ${messages.length} message(s).`);
+
+			// --- STEP 9: EXTRACT AND ENTER OTP CODE --------------------------
 			const otpCode = extractOtp(messages);
 			const verificationLink = extractVerificationLink(messages);
 
 			if (otpCode) {
-				console.log(`${logPrefix} Entering OTP code: ${otpCode}`);
+				log(`Extracted OTP code: ${otpCode}`);
+				await humanPause(800, 1500);
+
+				log("Focusing OTP input field...");
+
+				// 1. Force DOM focus on the input element (bypasses pointer-events limitations)
 				const focused = await page.evaluate((sel) => {
 					const el = document.querySelector(sel);
-					if (el) { el.focus(); el.click(); return true; }
+					if (el) {
+						el.focus();
+						el.click();
+						return true;
+					}
 					return false;
 				}, OTP_SELECTOR);
 
 				if (focused) {
+					log(`Entering OTP code directly: ${otpCode}`);
 					await directInput(page, OTP_SELECTOR, otpCode);
+					log("OTP code entered into input field!");
+				} else {
+					warn("OTP input field could not be focused on page.");
 				}
+			} else {
+				warn("No 6-digit OTP code found in received email(s).");
 			}
 
+			// --- STEP 10: AUTOMATIC VERIFICATION LINK FALLBACK ----------------
 			if (verificationLink) {
-				console.log(`${logPrefix} Navigating to verification link...`);
-				await humanPause(500, 1000);
-				await page.goto(verificationLink, { waitUntil: "networkidle2", timeout: 60000 });
+				log(`Direct verification link found in email:\n  ${verificationLink}`);
+				log("Navigating to verification link to complete account verification...");
+				await humanPause(1000, 2000);
+				await page.goto(verificationLink, {
+					waitUntil: "networkidle2",
+					timeout: 60000,
+				});
+				log("Navigated to verification link successfully!");
 			}
 		}
 
-		console.log(`${logPrefix} Ensuring navigation to https://admin.mistral.ai/ ...`);
-		await humanPause(1000, 2000);
-		if (!page.url().startsWith("https://admin.mistral.ai")) {
-			await page.goto("https://admin.mistral.ai/", { waitUntil: "networkidle2", timeout: 60000 });
-		}
-
-		// Check if organization creation is needed or if already inside an organization
-		const ORG_NAME_SELECTOR = 'input[name="name"], input[placeholder="My organization"]';
-		let needsOrgCreation = false;
-		try {
-			await page.waitForFunction(
-				(sel) => {
-					const hasOrgField = !!document.querySelector(sel);
-					const isApiKeysPage = window.location.href.includes("/organization/");
-					return hasOrgField || isApiKeysPage;
-				},
-				{ timeout: 30000 },
-				ORG_NAME_SELECTOR
-			);
-			needsOrgCreation = await page.evaluate((sel) => !!document.querySelector(sel), ORG_NAME_SELECTOR);
-		} catch (e) {
-			console.warn(`${logPrefix} Neither Org field nor redirect detected within 30s, attempting navigation to API keys page directly.`);
-		}
-
-		if (needsOrgCreation) {
-			const UNCOMMON_ORG_NAMES = [
-				"Apex Nebula Labs", "Zephyr Cybernetics", "Krypton Dynamics",
-				"Vortex Synthetics", "Obsidian Quantum", "Hyperion Analytics",
-				"Aetherial BioSystems", "Zenith Robotics", "Astraea Nexus",
-				"Chrono Logic Systems", "Solstice Enterprise", "Eclipse Innovation"
-			];
-			const orgName = `${pick(UNCOMMON_ORG_NAMES)} ${rand(100, 999)}`;
-			console.log(`${logPrefix} Entering organization name: ${orgName}`);
-			await directInput(page, ORG_NAME_SELECTOR, orgName);
-
-			await page.evaluate(() => {
-				const termsInput = document.querySelector('input[name="terms"]');
-				if (termsInput) {
-					if (!termsInput.checked && termsInput.getAttribute('aria-checked') !== 'true') {
-						const label = document.querySelector(`label[for="${termsInput.id}"]`) || termsInput;
-						label.click();
-					}
-				}
-			});
-
-			await page.waitForFunction(() => {
-				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-				return btns.some((b) => {
-					const label = (b.textContent || "").trim().toLowerCase();
-					return label === "create organization" && b.offsetParent !== null && !b.disabled && b.getAttribute("aria-disabled") !== "true";
-				});
-			}, { timeout: 30000 });
-
-			const createOrgBtnHandle = await page.evaluateHandle(() => {
-				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-				return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "create organization");
-			});
-			const createOrgEl = createOrgBtnHandle.asElement();
-			if (createOrgEl) await createOrgEl.click();
-			else await page.keyboard.press("Enter");
-		} else {
-			console.log(`${logPrefix} Organization already exists or skipped.`);
-		}
-
-		console.log(`${logPrefix} Navigating to API Keys page...`);
+		// --- STEP 11: CREATE ORGANIZATION ----------------------------------
+		log("Ensuring navigation to https://admin.mistral.ai/ ...");
 		await humanPause(1500, 3000);
-		if (!page.url().includes("/organization/api-keys")) {
-			await page.goto("https://admin.mistral.ai/organization/api-keys", { waitUntil: "networkidle2", timeout: 60000 });
+		if (!page.url().startsWith("https://admin.mistral.ai")) {
+			await page.goto("https://admin.mistral.ai/", {
+				waitUntil: "networkidle2",
+				timeout: 60000,
+			});
 		}
 
-		console.log(`${logPrefix} Clicking 'New key' button...`);
+		// Wait for Organization name input field
+		const ORG_NAME_SELECTOR = 'input[name="name"], input[placeholder="My organization"]';
+		log("Waiting for Organization name field...");
+		await page.waitForSelector(ORG_NAME_SELECTOR, { visible: true, timeout: 30000 });
+
+		// Generate a random uncommon organization name
+		const UNCOMMON_ORG_NAMES = [
+			"Apex Nebula Labs", "Zephyr Cybernetics", "Krypton Dynamics",
+			"Vortex Synthetics", "Obsidian Quantum", "Hyperion Analytics",
+			"Aetherial BioSystems", "Zenith Robotics", "Astraea Nexus",
+			"Chrono Logic Systems", "Solstice Enterprise", "Eclipse Innovation"
+		];
+		const orgName = `${pick(UNCOMMON_ORG_NAMES)} ${rand(100, 999)}`;
+		log(`Typing organization name: ${orgName}`);
+		await humanPause(500, 1000);
+		await humanType(page, ORG_NAME_SELECTOR, orgName);
+
+		// Accept Terms of Service & Privacy Policy checkbox
+		log("Accepting Terms of Service and Privacy Policy...");
+		await humanPause(400, 800);
+		await page.evaluate(() => {
+			const termsInput = document.querySelector('input[name="terms"]');
+			if (termsInput) {
+				if (!termsInput.checked && termsInput.getAttribute('aria-checked') !== 'true') {
+					const label = document.querySelector(`label[for="${termsInput.id}"]`) || termsInput;
+					label.click();
+				}
+			}
+		});
+
+		// Wait until "Create organization" button is enabled
+		log("Waiting for 'Create organization' button...");
 		await page.waitForFunction(() => {
-			const btns = Array.from(document.querySelectorAll("button"));
-			return btns.some((b) => (b.textContent || "").trim().toLowerCase().includes("new key") && b.offsetParent !== null);
+			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+			return btns.some((b) => {
+				const label = (b.textContent || "").trim().toLowerCase();
+				const enabled = !b.disabled && b.getAttribute("aria-disabled") !== "true";
+				return label === "create organization" && enabled;
+			});
 		}, { timeout: 30000 });
 
-		const newKeyBtnHandle = await page.evaluateHandle(() => {
-			const btns = Array.from(document.querySelectorAll("button"));
-			return btns.find((b) => (b.textContent || "").trim().toLowerCase().includes("new key"));
+		await humanPause(500, 1000);
+		await page.keyboard.press("Enter");
+		await page.evaluate(() => {
+			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+			const btn = btns.find((b) => (b.textContent || "").trim().toLowerCase() === "create organization");
+			if (btn) btn.click();
 		});
-		const newKeyEl = newKeyBtnHandle.asElement();
-		if (newKeyEl) await newKeyEl.click();
+		log("Submitted organization creation.");
 
-		console.log(`${logPrefix} Waiting for modal and selecting Workspace...`);
-		await page.waitForSelector('[role="dialog"]', { visible: true, timeout: 30000 });
+		// --- STEP 12: NAVIGATE TO API KEYS PAGE -----------------------------
+		log("Navigating to API Keys page...");
+		await humanPause(2000, 4000);
+		if (!page.url().includes("/organization/api-keys")) {
+			await page.goto("https://admin.mistral.ai/organization/api-keys", {
+				waitUntil: "networkidle2",
+				timeout: 60000,
+			});
+		}
+		log("API Keys page loaded.");
 
+		// Wait for "New key" button on API Keys page
+		log("Waiting for 'New key' button...");
+		await page.waitForFunction(() => {
+			const btns = Array.from(document.querySelectorAll("button"));
+			return btns.some((b) => {
+				const text = (b.textContent || "").trim().toLowerCase();
+				return text.includes("new key");
+			});
+		}, { timeout: 30000 });
+
+		await humanPause(500, 1000);
+		await page.evaluate(() => {
+			const btns = Array.from(document.querySelectorAll("button"));
+			const btn = btns.find((b) => (b.textContent || "").trim().toLowerCase().includes("new key"));
+			if (btn) btn.click();
+		});
+		log("Clicked 'New key' button.");
+
+		// --- STEP 13: MODAL - SELECT WORKSPACE & CREATE KEY ----------------
+		log("Waiting for Create new key modal...");
+		await page.waitForSelector('[role="dialog"]', { timeout: 30000 });
+		log("Modal opened.");
+
+		await humanPause(600, 1200);
+
+		// Locate and click the Workspace combobox inside modal
+		log("Opening Workspace selector...");
 		const workspaceBtnHandle = await page.evaluateHandle(() => {
 			const dialog = document.querySelector('[role="dialog"]');
 			if (!dialog) return null;
+
+			// Match label with text 'Workspace' then find its associated combobox button
 			const labels = Array.from(dialog.querySelectorAll('label'));
 			const wsLabel = labels.find(l => (l.textContent || '').trim().toLowerCase() === 'workspace');
 			if (wsLabel) {
@@ -412,37 +543,63 @@ async function runSingleAccountAutomation(workerId, accountNum, { alias, domainI
 					const target = dialog.querySelector(`#${forId}`) || document.getElementById(forId);
 					if (target) return target;
 				}
+				// Look for sibling/parent combobox
 				const parentDiv = wsLabel.closest('div');
 				if (parentDiv) {
 					const btn = parentDiv.querySelector('button[role="combobox"]');
 					if (btn) return btn;
 				}
 			}
+
+			// Fallback: first button with role combobox inside modal
 			const btns = Array.from(dialog.querySelectorAll('button[role="combobox"]'));
 			return btns.find((b) => (b.textContent || "").toLowerCase().includes("select workspace")) || btns[0];
 		});
 
 		const workspaceEl = workspaceBtnHandle.asElement();
 		if (workspaceEl) {
+			// Check if already open
 			const isOpen = await page.evaluate((el) => {
 				return el.getAttribute('aria-expanded') === 'true' || el.getAttribute('data-state') === 'open';
 			}, workspaceEl);
-			if (!isOpen) await workspaceEl.click();
+
+			if (!isOpen) {
+				await workspaceEl.click();
+				log("Clicked Workspace dropdown button.");
+			} else {
+				log("Workspace dropdown button is already open.");
+			}
+		} else {
+			warn("Workspace combobox button not found in modal.");
 		}
 
-		await humanPause(500, 1000);
+		await humanPause(600, 1200);
+
+		// Select "Default" workspace option from dropdown menu portal
+		log("Selecting 'Default' workspace from dropdown...");
 		let selectedDefault = false;
+
 		try {
+			// Wait for menu options to appear
 			await page.waitForFunction(() => {
 				const items = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [data-radix-collection-item], [cmdk-item]'));
 				if (items.length > 0) return true;
+				// Or check for leaf text nodes containing default
 				const leafs = Array.from(document.querySelectorAll('*')).filter(el => el.children.length === 0);
 				return leafs.some(el => (el.textContent || '').trim().toLowerCase().includes('default'));
 			}, { timeout: 5000 });
 
 			selectedDefault = await page.evaluate(() => {
-				const roleItems = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [data-radix-collection-item], [cmdk-item]'));
-				let target = roleItems.find(el => (el.textContent || "").trim().toLowerCase().includes("default"));
+				// Search explicit role items first
+				const roleItems = Array.from(document.querySelectorAll(
+					'[role="option"], [role="menuitem"], [role="menuitemradio"], [data-radix-collection-item], [cmdk-item]'
+				));
+				let target = roleItems.find(el => {
+					const txt = (el.textContent || "").trim().toLowerCase();
+					return txt === "default" || txt.includes("default");
+				});
+
+				// Fallback: search leaf DOM elements to avoid matching parent container divs
 				if (!target) {
 					const candidates = Array.from(document.querySelectorAll('div, span, button, p, li'));
 					target = candidates.find(el => {
@@ -451,6 +608,7 @@ async function runSingleAccountAutomation(workerId, accountNum, { alias, domainI
 						return isLeaf && (txt === "default" || txt === "default workspace" || txt.startsWith("default"));
 					});
 				}
+
 				if (target) {
 					target.scrollIntoView({ block: 'nearest' });
 					target.click();
@@ -461,136 +619,195 @@ async function runSingleAccountAutomation(workerId, accountNum, { alias, domainI
 				}
 				return false;
 			});
-		} catch (e) {}
+		} catch (e) {
+			warn("DOM selection for 'Default' option failed or timed out:", e.message);
+		}
 
-		if (!selectedDefault) {
+		if (selectedDefault) {
+			log("Selected 'Default' workspace option successfully.");
+		} else {
+			warn("Using keyboard fallback to select 'Default' workspace...");
 			await page.keyboard.press("ArrowDown");
 			await sleep(200);
 			await page.keyboard.press("Enter");
 		}
 
-		await humanPause(500, 1000);
+		await humanPause(800, 1500);
 
-		const modalSubmitBtnHandle = await page.evaluateHandle(() => {
+		// Click "New key" submit button in modal
+		log("Clicking 'New key' submit button in modal...");
+		await page.evaluate(() => {
 			const dialog = document.querySelector('[role="dialog"]');
-			if (!dialog) return null;
+			if (!dialog) return;
 			const btns = Array.from(dialog.querySelectorAll('button[type="submit"], button'));
-			return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "new key" && b.offsetParent !== null);
-		});
-		const modalSubmitEl = modalSubmitBtnHandle.asElement();
-		if (modalSubmitEl) await modalSubmitEl.click();
-		else {
-			await page.evaluate(() => {
-				const dialog = document.querySelector('[role="dialog"]');
-				const form = dialog ? dialog.querySelector("form") : null;
+			const btn = btns.find((b) => (b.textContent || "").trim().toLowerCase() === "new key");
+			if (btn) {
+				btn.click();
+			} else {
+				const form = dialog.querySelector("form");
 				if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
-			});
-		}
+			}
+		});
+		log("Submitted 'New key' modal form.");
 
-		console.log(`${logPrefix} Waiting for API key created modal...`);
+		// --- STEP 14: EXTRACT API KEY AND SAVE TO TXT FILE -----------------
+		log("Waiting for API key created modal...");
 		await page.waitForFunction(() => {
 			const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-			return dialogs.some(d => (d.textContent || "").toLowerCase().includes("api key created") || d.querySelector('input[readonly]'));
+			return dialogs.some(d => {
+				const txt = (d.textContent || "").toLowerCase();
+				return txt.includes("api key created") || d.querySelector('input[readonly]');
+			});
 		}, { timeout: 30000 });
+
+		log("API key created modal detected. Extracting key...");
 
 		const apiKey = await page.evaluate(() => {
 			const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
 			const targetDialog = dialogs.find(d => (d.textContent || "").toLowerCase().includes("api key created")) || dialogs[dialogs.length - 1];
 			if (!targetDialog) return null;
+
 			const input = targetDialog.querySelector('input[readonly], input[value]');
-			return input && input.value ? input.value.trim() : null;
+			if (input && input.value) {
+				return input.value.trim();
+			}
+			return null;
 		});
 
 		if (apiKey) {
-			console.log(`\n${logPrefix} SUCCESS! Generated API Key: ${apiKey}`);
-			fs.appendFileSync("api_keys.txt", `${apiKey}\n`, "utf-8");
-			console.log(`${logPrefix} API Key saved to api_keys.txt`);
+			log(`==================================================`);
+			log(`SUCCESS! Extracted API Key: ${apiKey}`);
+			log(`==================================================`);
+
+			const outputLine = `${apiKey}\n`;
+			const filePath = "api_keys.txt";
+			fs.appendFileSync(filePath, outputLine, "utf-8");
+			log(`API Key saved successfully to file: ${filePath}`);
 		} else {
-			throw new Error("Failed to extract API key from modal input.");
+			warn("Could not extract API key value from modal input.");
 		}
 
-		await page.evaluate(() => {
+		// Click "Done" button to close modal
+		log("Clicking 'Done' button in modal...");
+		const doneClicked = await page.evaluate(() => {
 			const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
 			const targetDialog = dialogs.find(d => (d.textContent || "").toLowerCase().includes("api key created")) || dialogs[dialogs.length - 1];
-			if (targetDialog) {
-				const btns = Array.from(targetDialog.querySelectorAll('button'));
-				const doneBtn = btns.find(b => (b.textContent || "").trim().toLowerCase() === "done");
-				if (doneBtn) doneBtn.click();
+			if (!targetDialog) return false;
+
+			const btns = Array.from(targetDialog.querySelectorAll('button'));
+			const doneBtn = btns.find(b => (b.textContent || "").trim().toLowerCase() === "done");
+			if (doneBtn) {
+				doneBtn.click();
+				return true;
 			}
+			return false;
 		});
 
-	} finally {
-		if (browser && !keepOpen) {
-			console.log(`${logPrefix} Closing browser instance...`);
-			await browser.close().catch(() => {});
+		if (doneClicked) {
+			log("Clicked 'Done' button successfully.");
+		} else {
+			warn("Could not find 'Done' button in modal.");
 		}
+
+		await humanPause(1000, 2000);
+		log("Task completed successfully. Closing browser...");
+		if (browser) {
+			await browser.close();
+		}
+		return { success: true, apiKey, email: EMAIL };
+	} catch (err) {
+		error("Something went wrong:", err.message);
+		if (browser) {
+			try {
+				await browser.close();
+			} catch (_) {}
+		}
+		return { success: false, error: err.message };
 	}
 }
 
-// ---- Concurrent Worker Pool Entry Point ------------------------------------
+// ---- PARALLEL WORKER POOL -----------------------------------------------
 
-(async () => {
-	const cliCountArg = process.argv[2];
-	const cliWorkersArg = process.argv[3];
-	const cliAlias = process.argv[4];
-	const cliDomainId = process.argv[5] ? parseInt(process.argv[5], 10) : undefined;
-
-	let totalAccounts = parseInt(process.env.COUNT || cliCountArg || "1", 10);
-	if (isNaN(totalAccounts) || totalAccounts < 1) totalAccounts = 1;
-
-	let maxWorkers = parseInt(process.env.WORKERS || cliWorkersArg || "1", 10);
-	if (isNaN(maxWorkers) || maxWorkers < 1) maxWorkers = 1;
-
-	const effectiveWorkers = Math.min(maxWorkers, totalAccounts);
-	const isCI = !!process.env.CI;
-
-	console.log(`==================================================`);
-	console.log(`Mistral API Key Generator (Multi-Worker Pool)`);
-	console.log(`Target Accounts      : ${totalAccounts}`);
-	console.log(`Parallel Workers     : ${effectiveWorkers}`);
-	console.log(`Environment          : ${isCI ? "CI (Headless)" : "Local"}`);
+async function runParallelPool(totalTasks, concurrency) {
+	console.log(`\n==================================================`);
+	console.log(`STARTING PARALLEL EXECUTION`);
+	console.log(`Total Accounts to Process: ${totalTasks}`);
+	console.log(`Max Concurrent Threads:   ${concurrency}`);
 	console.log(`==================================================\n`);
 
-	let nextAccountIndex = 0;
+	let completedCount = 0;
 	let successCount = 0;
-	let failureCount = 0;
+	let failCount = 0;
+	let currentTaskIndex = 0;
 
-	async function workerLoop(workerId) {
-		while (true) {
-			if (nextAccountIndex >= totalAccounts) break;
-			const taskIndex = ++nextAccountIndex;
-
-			const keepOpen = (totalAccounts === 1 && !isCI);
-
-			try {
-				await runSingleAccountAutomation(workerId, taskIndex, {
-					alias: cliAlias,
-					domainId: cliDomainId,
-					isCI,
-					keepOpen,
-				});
+	async function worker(workerId) {
+		while (currentTaskIndex < totalTasks) {
+			const taskId = ++currentTaskIndex;
+			console.log(`[Worker #${workerId}] Picking up Task #${taskId} of ${totalTasks}...`);
+			const result = await runSingleTask(taskId);
+			completedCount++;
+			if (result.success && result.apiKey) {
 				successCount++;
-			} catch (err) {
-				failureCount++;
-				console.error(`[Worker #${workerId} | Account #${taskIndex}] Error: ${err.message}`);
+				console.log(`[Worker #${workerId}] Task #${taskId} FINISHED SUCCESSFULLY -> Key: ${result.apiKey}`);
+			} else {
+				failCount++;
+				console.warn(`[Worker #${workerId}] Task #${taskId} FAILED -> Error: ${result.error || "Unknown"}`);
 			}
 		}
 	}
 
-	const workerPromises = [];
-	for (let w = 1; w <= effectiveWorkers; w++) {
-		workerPromises.push(workerLoop(w));
+	const pool = [];
+	for (let i = 1; i <= Math.min(concurrency, totalTasks); i++) {
+		pool.push(worker(i));
 	}
 
-	await Promise.all(workerPromises);
+	await Promise.all(pool);
 
 	console.log(`\n==================================================`);
-	console.log(`SUMMARY: All Account Tasks Finished`);
-	console.log(`Total Target Accounts : ${totalAccounts}`);
-	console.log(`Successful           : ${successCount}`);
-	console.log(`Failed               : ${failureCount}`);
-	console.log(`Saved File           : api_keys.txt`);
+	console.log(`ALL PARALLEL TASKS COMPLETED`);
+	console.log(`Total Requested: ${totalTasks}`);
+	console.log(`Successful:     ${successCount}`);
+	console.log(`Failed:         ${failCount}`);
+	console.log(`API Keys saved to api_keys.txt`);
 	console.log(`==================================================\n`);
+}
 
-	process.exit(failureCount === totalAccounts ? 1 : 0);
+// ---- MAIN ENTRY POINT ---------------------------------------------------
+
+(async () => {
+	const arg2 = process.argv[2];
+	const arg3 = process.argv[3];
+
+	// Check if parallel parameters are passed:
+	// Usage examples:
+	//   node run.js                    -> 1 task single run
+	//   node run.js 5                  -> 5 tasks, 5 parallel concurrency
+	//   node run.js 10 3               -> 10 tasks, 3 max parallel concurrency
+	//   node run.js --parallel 4       -> 4 tasks, 4 parallel concurrency
+	//   node run.js john 1             -> 1 task with custom alias john & domainId 1
+
+	let isParallelMode = false;
+	let totalTasks = 1;
+	let concurrency = 1;
+
+	if (arg2 === "--parallel" || arg2 === "-p" || arg2 === "--count" || arg2 === "-c") {
+		isParallelMode = true;
+		totalTasks = arg3 ? parseInt(arg3, 10) : 3;
+		concurrency = process.argv[4] ? parseInt(process.argv[4], 10) : totalTasks;
+	} else if (arg2 && !isNaN(parseInt(arg2, 10)) && (!arg3 || !isNaN(parseInt(arg3, 10)))) {
+		isParallelMode = true;
+		totalTasks = parseInt(arg2, 10);
+		concurrency = arg3 ? parseInt(arg3, 10) : totalTasks;
+	}
+
+	if (isParallelMode && totalTasks > 1) {
+		await runParallelPool(totalTasks, concurrency);
+		process.exit(0);
+	} else {
+		// Single run mode (retains full compatibility with custom alias & domainId)
+		const cliAlias = (arg2 && isNaN(parseInt(arg2, 10))) ? arg2 : undefined;
+		const cliDomainId = arg3 ? parseInt(arg3, 10) : undefined;
+		const res = await runSingleTask(1, { cliAlias, cliDomainId });
+		process.exit(res.success ? 0 : 1);
+	}
 })();
