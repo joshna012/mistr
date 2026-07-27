@@ -321,45 +321,63 @@ async function runSingleAccountAutomation(workerId, accountNum, { alias, domainI
 			await page.goto("https://admin.mistral.ai/", { waitUntil: "networkidle2", timeout: 60000 });
 		}
 
+		// Check if organization creation is needed or if already inside an organization
 		const ORG_NAME_SELECTOR = 'input[name="name"], input[placeholder="My organization"]';
-		console.log(`${logPrefix} Waiting for Organization name field...`);
-		await page.waitForSelector(ORG_NAME_SELECTOR, { visible: true, timeout: 30000 });
+		let needsOrgCreation = false;
+		try {
+			await page.waitForFunction(
+				(sel) => {
+					const hasOrgField = !!document.querySelector(sel);
+					const isApiKeysPage = window.location.href.includes("/organization/");
+					return hasOrgField || isApiKeysPage;
+				},
+				{ timeout: 30000 },
+				ORG_NAME_SELECTOR
+			);
+			needsOrgCreation = await page.evaluate((sel) => !!document.querySelector(sel), ORG_NAME_SELECTOR);
+		} catch (e) {
+			console.warn(`${logPrefix} Neither Org field nor redirect detected within 30s, attempting navigation to API keys page directly.`);
+		}
 
-		const UNCOMMON_ORG_NAMES = [
-			"Apex Nebula Labs", "Zephyr Cybernetics", "Krypton Dynamics",
-			"Vortex Synthetics", "Obsidian Quantum", "Hyperion Analytics",
-			"Aetherial BioSystems", "Zenith Robotics", "Astraea Nexus",
-			"Chrono Logic Systems", "Solstice Enterprise", "Eclipse Innovation"
-		];
-		const orgName = `${pick(UNCOMMON_ORG_NAMES)} ${rand(100, 999)}`;
-		console.log(`${logPrefix} Entering organization name: ${orgName}`);
-		await directInput(page, ORG_NAME_SELECTOR, orgName);
+		if (needsOrgCreation) {
+			const UNCOMMON_ORG_NAMES = [
+				"Apex Nebula Labs", "Zephyr Cybernetics", "Krypton Dynamics",
+				"Vortex Synthetics", "Obsidian Quantum", "Hyperion Analytics",
+				"Aetherial BioSystems", "Zenith Robotics", "Astraea Nexus",
+				"Chrono Logic Systems", "Solstice Enterprise", "Eclipse Innovation"
+			];
+			const orgName = `${pick(UNCOMMON_ORG_NAMES)} ${rand(100, 999)}`;
+			console.log(`${logPrefix} Entering organization name: ${orgName}`);
+			await directInput(page, ORG_NAME_SELECTOR, orgName);
 
-		await page.evaluate(() => {
-			const termsInput = document.querySelector('input[name="terms"]');
-			if (termsInput) {
-				if (!termsInput.checked && termsInput.getAttribute('aria-checked') !== 'true') {
-					const label = document.querySelector(`label[for="${termsInput.id}"]`) || termsInput;
-					label.click();
+			await page.evaluate(() => {
+				const termsInput = document.querySelector('input[name="terms"]');
+				if (termsInput) {
+					if (!termsInput.checked && termsInput.getAttribute('aria-checked') !== 'true') {
+						const label = document.querySelector(`label[for="${termsInput.id}"]`) || termsInput;
+						label.click();
+					}
 				}
-			}
-		});
-
-		await page.waitForFunction(() => {
-			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-			return btns.some((b) => {
-				const label = (b.textContent || "").trim().toLowerCase();
-				return label === "create organization" && b.offsetParent !== null && !b.disabled && b.getAttribute("aria-disabled") !== "true";
 			});
-		}, { timeout: 30000 });
 
-		const createOrgBtnHandle = await page.evaluateHandle(() => {
-			const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
-			return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "create organization");
-		});
-		const createOrgEl = createOrgBtnHandle.asElement();
-		if (createOrgEl) await createOrgEl.click();
-		else await page.keyboard.press("Enter");
+			await page.waitForFunction(() => {
+				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+				return btns.some((b) => {
+					const label = (b.textContent || "").trim().toLowerCase();
+					return label === "create organization" && b.offsetParent !== null && !b.disabled && b.getAttribute("aria-disabled") !== "true";
+				});
+			}, { timeout: 30000 });
+
+			const createOrgBtnHandle = await page.evaluateHandle(() => {
+				const btns = Array.from(document.querySelectorAll('button[type="submit"]'));
+				return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "create organization");
+			});
+			const createOrgEl = createOrgBtnHandle.asElement();
+			if (createOrgEl) await createOrgEl.click();
+			else await page.keyboard.press("Enter");
+		} else {
+			console.log(`${logPrefix} Organization already exists or skipped.`);
+		}
 
 		console.log(`${logPrefix} Navigating to API Keys page...`);
 		await humanPause(1500, 3000);
