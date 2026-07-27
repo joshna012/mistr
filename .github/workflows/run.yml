@@ -21,10 +21,7 @@ on:
         description: 'Optional domain ID'
         required: false
         type: string
-  push:
-    branches:
-      - main
-      - master
+
 
 jobs:
   run-automation:
