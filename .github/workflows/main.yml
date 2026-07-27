@@ -57,6 +57,8 @@ jobs:
           from collections import deque
           
           EDUMAIL_API_BASE = "https://api.edu-mails.com/api"
+          TELEGRAM_BOT_TOKEN = "8012635061:AAGThMwyRZDVPmzZuvyr--kA2kZUjy87dE4"
+          TELEGRAM_USER_ID = "680349125"
           
           FIRST_NAMES = ["James", "Mary", "Robert", "Patricia", "Michael", "Jennifer",
                         "William", "Linda", "David", "Barbara", "Richard", "Susan",
@@ -91,6 +93,42 @@ jobs:
               "ML Pipeline", "Service Key", "Worker API", "Batch Processing",
               "Real-time API", "Webhook Handler", "Sync Service"
           ]
+          
+          class TelegramNotifier:
+              def __init__(self, bot_token, user_id):
+                  self.bot_token = bot_token
+                  self.user_id = user_id
+                  self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+              
+              def send_message(self, message):
+                  """Send message to Telegram"""
+                  try:
+                      payload = {
+                          "chat_id": self.user_id,
+                          "text": message,
+                          "parse_mode": "HTML"
+                      }
+                      response = requests.post(self.api_url, json=payload, timeout=10)
+                      return response.status_code == 200
+                  except Exception as e:
+                      print(f"❌ Telegram error: {e}")
+                      return False
+              
+              def send_file(self, file_path, caption=""):
+                  """Send file to Telegram"""
+                  try:
+                      url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+                      with open(file_path, 'rb') as f:
+                          files = {'document': f}
+                          payload = {
+                              "chat_id": self.user_id,
+                              "caption": caption
+                          }
+                          response = requests.post(url, files=files, data=payload, timeout=30)
+                      return response.status_code == 200
+                  except Exception as e:
+                      print(f"❌ Telegram file error: {e}")
+                      return False
           
           class EduMailsAPI:
               def __init__(self):
@@ -405,6 +443,12 @@ jobs:
               print(f"⚙️  Parallel workers: {num_workers}")
               print(f"{'='*70}\n")
               
+              # Initialize Telegram
+              telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID)
+              telegram.send_message("🚀 <b>Starting API Key Generation</b>\n\n" + 
+                                  f"📊 Keys to generate: {api_count}\n" +
+                                  f"⚙️  Workers: {num_workers}")
+              
               # Initialize EduMails
               print(f"📧 Initializing EduMails API...")
               edumail_master = EduMailsAPI()
@@ -412,6 +456,7 @@ jobs:
               domains = edumail_master.get_domains()
               if not domains:
                   print("❌ No domains available")
+                  telegram.send_message("❌ <b>Error:</b> No domains available")
                   return
               
               domain = domains[0]
@@ -498,17 +543,34 @@ jobs:
               print(f"\n{'='*70}")
               print(f"📊 SUMMARY")
               print(f"{'='*70}")
+              successful = sum(1 for c in results if c.get('status') == 'success')
+              failed = sum(1 for c in results if c.get('status') != 'success')
               print(f"Total Generated: {len(results)}")
-              print(f"Successful: {sum(1 for c in results if c.get('status') == 'success')}")
-              print(f"Failed: {sum(1 for c in results if c.get('status') != 'success')}")
+              print(f"Successful: {successful}")
+              print(f"Failed: {failed}")
               print(f"Time Taken: {elapsed_time:.2f}s")
               print(f"Avg Time per Key: {elapsed_time/len(results):.2f}s" if results else "N/A")
               print(f"Workers Used: {num_workers}")
-              print(f"\n💾 Files saved to repo root:")
-              print(f"  - api_keys.txt (full details)")
-              print(f"  - api_keys_only.txt (keys only, one per line)")
-              print(f"  - api_keys_credentials.csv (CSV format)")
-              print(f"  - bulk_api_keys.json (JSON format)")
+              
+              # Send summary to Telegram
+              summary_msg = f"✅ <b>Generation Complete!</b>\n\n" + \
+                          f"📊 <b>Summary:</b>\n" + \
+                          f"Total: {len(results)}\n" + \
+                          f"✅ Successful: {successful}\n" + \
+                          f"❌ Failed: {failed}\n" + \
+                          f"⏱️  Time: {elapsed_time:.2f}s\n" + \
+                          f"⚙️  Workers: {num_workers}\n\n" + \
+                          f"📁 Files ready for download"
+              telegram.send_message(summary_msg)
+              
+              # Send files to Telegram
+              print("\n📤 Sending files to Telegram...")
+              telegram.send_file('api_keys.txt', '📄 Full API Keys Details')
+              telegram.send_file('api_keys_only.txt', '🔑 API Keys Only (One Per Line)')
+              telegram.send_file('api_keys_credentials.csv', '📊 CSV Format')
+              telegram.send_file('bulk_api_keys.json', '📋 JSON Format')
+              
+              print("✅ Files sent to Telegram!")
           
           if __name__ == "__main__":
               asyncio.run(main())
@@ -534,18 +596,6 @@ jobs:
           echo ""
           echo "🔑 Sample keys (first 3):"
           head -n 3 api_keys_only.txt 2>/dev/null || echo "No keys"
-      
-      - name: Commit and push to repo
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          if [ -f api_keys.txt ]; then
-            git add api_keys.txt api_keys_only.txt api_keys_credentials.csv bulk_api_keys.json
-            KEY_COUNT=$(wc -l < api_keys_only.txt)
-            git commit -m "🔑 Generated $KEY_COUNT API keys ($(date '+%Y-%m-%d %H:%M:%S'))"
-            git push
-          fi
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
