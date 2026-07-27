@@ -193,19 +193,53 @@ jobs:
                   print("Continue may still be disabled, clicking anyway:", exc)
               continue_btn.click(force=True)
 
-              # 3) Fill password + random name, then sign up.
-              password_field = page.locator("input[name='password']")
-              password_field.wait_for(state="visible", timeout=30000)
-              password_field.click()
-              password_field.fill(PASSWORD)
-              page.locator("input[name='firstName']").fill(FIRST_NAME)
-              page.locator("input[name='lastName']").fill(LAST_NAME)
+              # 3) Fill password + random name with REAL keystrokes.
+              # fill() sets the DOM value but does not update this form's React
+              # state, so submission silently fails. Type + verify instead.
+              def robust_type(selector, value, label):
+                  field = page.locator(selector)
+                  field.wait_for(state="visible", timeout=30000)
+                  for attempt in range(4):
+                      field.click()
+                      field.fill("")
+                      try:
+                          field.press_sequentially(value, delay=50)
+                      except Exception:
+                          field.type(value, delay=50)
+                      if field.input_value() == value:
+                          return
+                      print("%s not registered (attempt %d)" % (label, attempt + 1))
+                      page.wait_for_timeout(400)
+                  raise RuntimeError("Failed to enter %s" % label)
+
+              robust_type("input[name='password']", PASSWORD, "password")
+              robust_type("input[name='firstName']", FIRST_NAME, "first name")
+              robust_type("input[name='lastName']", LAST_NAME, "last name")
               print("Filled name:", FIRST_NAME, LAST_NAME)
 
               signup_btn = page.get_by_role("button", name="Signup")
               signup_btn.wait_for(state="visible", timeout=30000)
-              signup_btn.click()
+              # Wait until the Signup button is enabled (form validated).
+              try:
+                  page.wait_for_function(
+                      "() => { const b = [...document.querySelectorAll('button')]"
+                      ".find(x => x.textContent.trim() === 'Signup');"
+                      " return b && !b.disabled && b.getAttribute('aria-disabled') !== 'true'; }",
+                      timeout=10000)
+              except Exception as exc:
+                  print("Signup may still be disabled, clicking anyway:", exc)
+              signup_btn.click(force=True)
               page.wait_for_load_state("networkidle")
+
+              # Confirm we actually left the signup form; if not, retry once.
+              if page.get_by_role("button", name="Signup").count() > 0:
+                  print("Still on signup form after click; retrying submit...")
+                  page.wait_for_timeout(1000)
+                  try:
+                      page.get_by_role("button", name="Signup").click(force=True)
+                      page.wait_for_load_state("networkidle")
+                  except Exception as exc:
+                      print("Retry submit failed:", exc)
               print("URL after signup:", page.url)
               # Diagnostic screenshot of whatever screen followed Signup.
               page.screenshot(path="after_signup.png", full_page=True)
