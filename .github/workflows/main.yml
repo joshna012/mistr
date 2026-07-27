@@ -7,7 +7,8 @@ on:
         description: "Optional custom email username (leave blank for a random address)"
         required: false
         default: ""
-
+  # schedule:
+  #   - cron: "0 * * * *"   # optional: run on a schedule
 
 jobs:
   run-camoufox:
@@ -43,8 +44,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -U "camoufox[geoip]"
-          # Download the patched Firefox binary
-          python -m camoufox fetch
+          # Download the patched Firefox binary (retry once on flaky networks).
+          camoufox fetch || camoufox fetch
+          # Verify the browser is actually installed before continuing.
+          python -c "from camoufox.pkgman import installed_verstr; print('Camoufox browser version:', installed_verstr())"
 
       - name: Write browser script
         run: |
@@ -268,7 +271,10 @@ jobs:
           EOF
 
       - name: Run Camoufox
-        run: python run.py
+        run: |
+          # Ensure the browser binary is present (idempotent; quick if already fetched).
+          camoufox fetch || camoufox fetch
+          python run.py
 
       - name: Commit API key to repo root
         if: success()
