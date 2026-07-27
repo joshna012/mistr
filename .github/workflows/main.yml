@@ -154,13 +154,44 @@ jobs:
               # 2) Enter the email and continue.
               email_field = page.locator("input[name='email']")
               email_field.wait_for(state="visible", timeout=30000)
-              email_field.click()
-              email_field.fill(EMAIL)
-              print("Entered email:", email_field.input_value())
+
+              # React-controlled input: fill() can silently no-op, so type real
+              # keystrokes and verify the value actually landed (retry a few times).
+              entered = ""
+              for attempt in range(4):
+                  email_field.click()
+                  email_field.fill("")
+                  try:
+                      email_field.press_sequentially(EMAIL, delay=60)
+                  except Exception:
+                      # Older Playwright: fall back to type().
+                      email_field.type(EMAIL, delay=60)
+                  entered = email_field.input_value()
+                  if entered == EMAIL:
+                      break
+                  print("Email not registered (attempt %d): %r" % (attempt + 1, entered))
+                  page.wait_for_timeout(500)
+              print("Entered email:", entered)
+              if entered != EMAIL:
+                  page.screenshot(path="after_signup.png", full_page=True)
+                  raise RuntimeError("Failed to enter email into the field.")
+
+              # Blur so the form validates and enables the Continue button.
+              email_field.press("Tab")
 
               continue_btn = page.get_by_role("button", name="Continue")
               continue_btn.wait_for(state="visible", timeout=30000)
-              continue_btn.click()
+              # Wait until it is enabled, then click (force as a safety net).
+              try:
+                  continue_btn.wait_for(state="visible", timeout=5000)
+                  page.wait_for_function(
+                      "() => { const b = [...document.querySelectorAll('button')]"
+                      ".find(x => x.textContent.trim() === 'Continue');"
+                      " return b && !b.disabled && b.getAttribute('aria-disabled') !== 'true'; }",
+                      timeout=10000)
+              except Exception as exc:
+                  print("Continue may still be disabled, clicking anyway:", exc)
+              continue_btn.click(force=True)
 
               # 3) Fill password + random name, then sign up.
               password_field = page.locator("input[name='password']")
