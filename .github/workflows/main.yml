@@ -210,16 +210,41 @@ jobs:
               # Diagnostic screenshot of whatever screen followed Signup.
               page.screenshot(path="after_signup.png", full_page=True)
 
+              def dump_screen(label):
+                  # Print the visible page text so CI logs reveal errors/captcha.
+                  try:
+                      body_text = page.inner_text("body")
+                  except Exception as exc:
+                      body_text = "(could not read body text: %s)" % exc
+                  print("----- %s (url: %s) -----" % (label, page.url))
+                  print(body_text[:2000])
+                  print("----- end %s -----" % label)
+
+              dump_screen("screen after signup")
+
               # 4) Wait for the OTP screen, fetch the code, and type it in.
-              # The input-otp widget renders a visually hidden <input>, so wait
-              # for it to be ATTACHED (not "visible") and interact with force.
+              # The input-otp widget renders a visually hidden <input>, so poll
+              # for EITHER the hidden input (attached) or the "Check your inbox"
+              # heading. If neither shows, dump the screen and fail clearly.
               otp_field = page.locator("input[data-input-otp='true']")
-              try:
-                  otp_field.wait_for(state="attached", timeout=60000)
-              except Exception:
-                  # Fall back to the "Check your inbox" heading as the signal.
-                  page.get_by_text("Check your inbox").wait_for(
-                      state="visible", timeout=60000)
+              inbox_text = page.get_by_text("Check your inbox")
+              otp_ready = False
+              deadline = time.time() + 90
+              while time.time() < deadline:
+                  try:
+                      if otp_field.count() > 0 or inbox_text.count() > 0:
+                          otp_ready = True
+                          break
+                  except Exception:
+                      pass
+                  page.wait_for_timeout(1000)
+              if not otp_ready:
+                  page.screenshot(path="after_signup.png", full_page=True)
+                  dump_screen("OTP screen NOT found")
+                  raise RuntimeError(
+                      "OTP screen did not appear after signup. See after_signup.png "
+                      "and the screen dump above (possible validation error or "
+                      "human-verification challenge).")
               print("OTP screen reached, waiting for the code...")
 
               otp = fetch_otp(EMAIL_UUID)
