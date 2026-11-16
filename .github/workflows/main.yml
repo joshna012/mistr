@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl wget git lsb-release ca-certificates gnupg \
-            software-properties-common build-essential linux-headers-$(uname -r)
+            software-properties-common build-essential linux-headers-$(uname -r) openssl
 
           if [ ! -e /dev/binder ] && [ ! -e /dev/binderfs/binder ]; then
             if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
@@ -58,7 +58,14 @@ jobs:
             tigervnc-standalone-server tigervnc-common \
             novnc websockify python3-numpy net-tools
 
-      - name: Install & Configure Waydroid (CPU-Only Software Rendering)
+      - name: Fix Host Networking & Forwarding for Waydroid Internet
+        run: |
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo iptables -P FORWARD ACCEPT
+          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
+          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
+
+      - name: Install & Configure Waydroid + Reqable System CA Certificate
         run: |
           curl -s https://repo.waydro.id | sudo bash
           sudo apt-get install -y waydroid
@@ -77,16 +84,60 @@ jobs:
 
           # Fix LXC container apparmor & permissions on cloud runners
           sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
+
+          # Save Reqable Root CA Certificate and compute Android system hash
+          cat << 'EOF' > /tmp/reqable.pem
+          -----BEGIN CERTIFICATE-----
+          MIIFDzCCA/egAwIBAgIUOkl2iSzmLNvVqAPLtLk5WxAWItAwDQYJKoZIhvcNAQEL
+          BQAwgZQxCzAJBgNVBAYTAkNOMREwDwYDVQQIDAhTaGFuZ2hhaTERMA8GA1UEBwwI
+          U2hhbmdoYWkxFTATBgNVBAoMDFJlcWFibGUsIExMQzFIMBsGA1UECwwUaHR0cHM6
+          Ly9yZXFhYmxlLmNvbS8wKQYDVQQDDCJSZXFhYmxlIENBIChOb3YgNiwgMjAyNiwg
+          QTdENTEyQUIpMB4XDTI2MTEwNjEzNTA0OFoXDTMzMDUzMTA1NTU0NlowgZQxCzAJ
+          BgNVBAYTAkNOMREwDwYDVQQIDAhTaGFuZ2hhaTERMA8GA1UEBwwIU2hhbmdoYWkx
+          FTATBgNVBAoMDFJlcWFibGUsIExMQzFIMBsGA1UECwwUaHR0cHM6Ly9yZXFhYmxl
+          LmNvbS8wKQYDVQQDDCJSZXFhYmxlIENBIChOb3YgNiwgMjAyNiwgQTdENTEyQUIp
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyFy8dWgIapoLlCEmujbc
+          gnnxxmtpYGWgkbXyTns0FYzCybrv58Z6bzya6Rk0LesucLRZdFbibDnuwznOYjHl
+          Oiqn5peLbijXPsn4tpHs1TYhCXFEAoVb0Q9LLcOUGvGjjmFD3AKBSlUG9JfGP0Zc
+          6oQBRtNuPqMMSl5lm2izevCP0lyYJLe7pkjiaiejR2dAlEUujPnm9bhwmZebGykO
+          C9sUCwHUIqTC0aZWOzNKypD5sWHvoNpF+qSCXpZ1ZecLW4H8P0GkGWaBmAtdX2Df
+          EMGf1Lmf97lWewfb9OPGmT2IhhQLoBNhoTMIsPVAlN0sw87aD9ENNUuOfP9kqncp
+          cwIDAQABo4IBVTCCAVEwHQYDVR0OBBYEFPKRkjP/NBFUWDG3x0Xn6b9pW2SWMB8G
+          A1UdIwQYMBaAFPKRkjP/NBFUWDG3x0Xn6b9pW2SWMA8GA1UdEwEB/wQFMAMBAf8w
+          DgYDVR0PAQH/BAQDAgIEMIHtBglghkgBhvhCAQ0Egd8WgdxUaGlzIFJvb3QgY2Vy
+          dGlmaWNhdGUgd2FzIGdlbmVyYXRlZCBieSBSZXFhYmxlIFByb3h5IGZvciBTU0wg
+          UHJveHlpbmcuIElmIHRoaXMgY2VydGlmaWNhdGUgaXMgcGFydCBvZiBhIGNlcnRp
+          ZmljYXRlIGNoYWluLCB0aGlzIG1lYW5zIHRoYXQgeW91J3JlIGJyb3dzaW5nIHRo
+          cm91Z2ggUmVxYWJsZSBQcm94eSB3aXRoIFNTTCBQcm94eWluZyBlbmFibGVkIGZv
+          ciB0aGlzIHdlYnNpdGUuMA0GCSqGSIb3DQEBCwUAA4IBAQBa8u0QFGBnm23C0Fi2
+          66jX5kqhM1T5tDRnruaDJFfQOebIU5VzOSP0V8uJFhIZmkrZDJFeK2kz25ObgoJT
+          oGIims/vNSvdQa7pB4F5za7hIGLiCepbbTJ/rwo5JYs2V5n9nXNovOgRlI/CaCgJ
+          p/EI8II4KOiIaPSlHm0ep5biYXQS0ZOrYyEAOaf+5XSn6dn693b8spXT3Mn0ntM4
+          Ifek0WTuB0tt/kKKfBtrHgB+/JybrnSSdlN/H2qgfpMd9pFlHcZDY5V3s3WDEqfX
+          VS8R2v36zsyroI3WzF/tTPwuuSR9X9fb6RHOLGoe7tW6p5MNcqzedGZdciMyvc3k
+          3ov/
+          -----END CERTIFICATE-----
+          EOF
+          sed -i 's/^[[:space:]]*//' /tmp/reqable.pem
+
+          CERT_HASH=$(openssl x509 -inform PEM -subject_hash_old -in /tmp/reqable.pem | head -1)
+          echo "Installing Reqable System CA as ${CERT_HASH}.0..."
+
+          sudo mkdir -p /var/lib/waydroid/overlay/system/etc/security/cacerts
+          sudo cp /tmp/reqable.pem "/var/lib/waydroid/overlay/system/etc/security/cacerts/${CERT_HASH}.0"
+          sudo chown -R root:root /var/lib/waydroid/overlay/system/etc/security/cacerts
+          sudo chmod 644 "/var/lib/waydroid/overlay/system/etc/security/cacerts/${CERT_HASH}.0"
+
           sudo waydroid upgrade -o
 
-      - name: Configure VNC, Autostart Waydroid & PulseAudio Socket
+      - name: Configure VNC, Autostart Waydroid, Internet NAT & Conscrypt CA Sync
         run: |
           mkdir -p ~/.vnc ~/Desktop
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # Auto-detect Weston Wayland socket, create dummy pulse socket & launch Waydroid
+          # Auto-detect Weston Wayland socket, fix NAT routing, launch Waydroid & sync CA
           cat << 'EOF' > ~/Desktop/start-waydroid.sh
           #!/bin/bash
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
@@ -96,6 +147,12 @@ jobs:
           touch "$XDG_RUNTIME_DIR/pulse/native"
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
+
+          # Ensure Docker's iptables rules do not block Waydroid internet
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          sudo iptables -P FORWARD ACCEPT
+          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
+          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
 
           pkill -f weston || true
           rm -f "$XDG_RUNTIME_DIR"/wayland-*
@@ -112,6 +169,26 @@ jobs:
           export WAYLAND_DISPLAY=$(basename "$SOCK")
           echo "Launching Waydroid on $WAYLAND_DISPLAY..." > /tmp/waydroid-ui.log
           waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
+
+          # Wait for Android boot, sync Reqable System CA & verify DNS/network
+          (
+            for i in {1..30}; do
+              if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
+                sudo waydroid shell settings put global captive_portal_mode 0
+                sudo waydroid shell sh -c '
+                  mkdir -p /tmp/cacerts_tmp
+                  cp /apex/com.android.conscrypt/cacerts/* /tmp/cacerts_tmp/ 2>/dev/null || true
+                  cp /system/etc/security/cacerts/*.0 /tmp/cacerts_tmp/ 2>/dev/null || true
+                  chown -R root:root /tmp/cacerts_tmp
+                  chmod 644 /tmp/cacerts_tmp/*
+                  mount --bind /tmp/cacerts_tmp /apex/com.android.conscrypt/cacerts
+                '
+                echo "Reqable System CA & Internet routing configured." >> /tmp/waydroid-ui.log
+                break
+              fi
+              sleep 2
+            done
+          ) &
           EOF
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-waydroid.sh
           chmod +x ~/Desktop/start-waydroid.sh
