@@ -18,32 +18,37 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Dependencies & Build Binder Kernel Module
+      - name: Install Dependencies & Setup Binder Kernel Module
         run: |
           sudo apt-get update
           sudo apt-get install -y curl wget git lsb-release ca-certificates gnupg \
             software-properties-common build-essential linux-headers-$(uname -r)
 
-          if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
-            echo "Building binder_linux directly for kernel $(uname -r)..."
-            KVER=$(uname -r | cut -d'-' -f1 | cut -d'.' -f1,2)
-            git clone --depth=1 https://github.com/torvalds/linux.git -b "v${KVER}" /tmp/linux-src || \
-            git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
+          if [ ! -e /dev/binder ] && [ ! -e /dev/binderfs/binder ]; then
+            if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
+              echo "Building binder_linux directly for kernel $(uname -r)..."
+              KVER=$(uname -r | cut -d'-' -f1 | cut -d'.' -f1,2)
+              git clone --depth=1 https://github.com/torvalds/linux.git -b "v${KVER}" /tmp/linux-src || \
+              git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
 
-            cd /tmp/linux-src/drivers/android
-            printf "obj-m += binder_linux.o\nbinder_linux-y := binder.o binder_alloc.o\nccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC\n" > Makefile
-            make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
-            sudo insmod binder_linux.ko devices="binder,hwbinder,vndbinder"
+              cd /tmp/linux-src/drivers/android
+              printf "obj-m += binder_linux.o\nbinder_linux-y := binder.o binder_alloc.o\nccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC\n" > Makefile
+              make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+              sudo insmod binder_linux.ko devices="binder,hwbinder,vndbinder"
+            fi
           fi
 
           if [ ! -e /dev/binder ]; then
             sudo mkdir -p /dev/binderfs
-            sudo mount -t binder binder /dev/binderfs || true
-            sudo ln -sf /dev/binderfs/* /dev/ 2>/dev/null || true
+            mountpoint -q /dev/binderfs || sudo mount -t binder binder /dev/binderfs || true
+            sudo ln -sf /dev/binderfs/binder /dev/binder 2>/dev/null || true
+            sudo ln -sf /dev/binderfs/hwbinder /dev/hwbinder 2>/dev/null || true
+            sudo ln -sf /dev/binderfs/vndbinder /dev/vndbinder 2>/dev/null || true
           fi
 
-          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
-          ls -la /dev/binder*
+          sudo chmod 755 /dev/binderfs 2>/dev/null || true
+          sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
+          sudo ls -la /dev/binder /dev/hwbinder /dev/vndbinder /dev/binderfs/
 
       - name: Install Desktop Environment, Weston, Mesa & noVNC
         run: |
@@ -70,7 +75,7 @@ jobs:
           persist.waydroid.udev=false
           EOF
 
-          # Fix LXC container apparmor & permissions on Azure runners
+          # Fix LXC container apparmor & permissions on cloud runners
           sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
           sudo waydroid upgrade -o
 
@@ -89,7 +94,8 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
-          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
+          sudo chmod 755 /dev/binderfs 2>/dev/null || true
+          sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
           pkill -f weston || true
           rm -f "$XDG_RUNTIME_DIR"/wayland-*
