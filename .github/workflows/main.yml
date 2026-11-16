@@ -67,7 +67,7 @@ jobs:
         with:
           path: |
             /tmp/waydroid-cache
-          key: waydroid-fast-${{ github.event.inputs.android_type }}-v5
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v6
 
       - name: Download Latest Reqable Android x86_64 APK (16x Parallel)
         run: |
@@ -127,10 +127,16 @@ jobs:
             /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
             sudo /tmp/waydroid_script/venv/bin/python3 /tmp/waydroid_script/main.py install libhoudini
 
-            sudo cp /var/lib/waydroid/images/system.img /tmp/waydroid-cache/
-            sudo cp /var/lib/waydroid/images/vendor.img /tmp/waydroid-cache/
+            # Save images from whichever directory they reside in
+            if [ -f /usr/share/waydroid-extra/images/system.img ]; then
+              sudo cp /usr/share/waydroid-extra/images/system.img /tmp/waydroid-cache/
+              sudo cp /usr/share/waydroid-extra/images/vendor.img /tmp/waydroid-cache/
+            elif [ -f /var/lib/waydroid/images/system.img ]; then
+              sudo cp /var/lib/waydroid/images/system.img /tmp/waydroid-cache/
+              sudo cp /var/lib/waydroid/images/vendor.img /tmp/waydroid-cache/
+            fi
             sudo tar -czf /tmp/waydroid-cache/overlay.tar.gz -C /var/lib/waydroid overlay 2>/dev/null || true
-            sudo chown -R $USER:$USER /tmp/waydroid-cache
+            sudo chown -R $USER:$USER /tmp/waydroid-cache || true
           fi
 
           sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
@@ -227,7 +233,6 @@ jobs:
 
       - name: Configure Separate Android-Only Display (:2) & Full Linux Display (:1)
         run: |
-          # Clean Weston config (no broken kiosk-shell.so, no top panel bar)
           cat << 'EOF' > ~/.config/weston.ini
           [core]
           idle-time=0
@@ -238,7 +243,6 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*//' ~/.config/weston.ini
 
-          # Script to launch Android-Only on Display :2 (Weston without --fullscreen crash)
           cat << 'EOF' > ~/Desktop/start-android-only.sh
           #!/bin/bash
           export DISPLAY=:2
@@ -295,7 +299,6 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
 
-          # Display :1 xstartup (Full Linux Desktop with separate runtime dir)
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
           unset SESSION_MANAGER
@@ -310,7 +313,6 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
-          # Display :2 xstartup (Dedicated Android-Only session)
           cat << 'EOF' > ~/.vnc/xstartup-android
           #!/bin/bash
           unset SESSION_MANAGER
