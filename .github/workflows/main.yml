@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (GAPPS + ARM64 libhoudini + Reqable)
+name: Waydroid Root in Browser (Ultra-Fast 2-Min Cache + GAPPS + ARM64 + Reqable)
 
 on:
   workflow_dispatch:
@@ -20,14 +20,18 @@ jobs:
     steps:
       - name: Install Dependencies & Setup Binder Kernel Module
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl wget git jq lsb-release ca-certificates gnupg \
-            software-properties-common build-essential linux-headers-$(uname -r) openssl inotify-tools \
-            python3-venv python3-pip lzip
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl wget git jq aria2 unzip lsb-release ca-certificates gnupg \
+            software-properties-common build-essential linux-headers-$(uname -r) openssl \
+            python3-venv python3-pip lzip \
+            xfce4 xfce4-terminal dbus-x11 \
+            weston xwayland mesa-utils libgl1-mesa-dri iptables dnsmasq pulseaudio \
+            tigervnc-standalone-server tigervnc-common \
+            novnc websockify python3-numpy net-tools
 
           if [ ! -e /dev/binder ] && [ ! -e /dev/binderfs/binder ]; then
             if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
-              echo "Building binder_linux directly for kernel $(uname -r)..."
               KVER=$(uname -r | cut -d'-' -f1 | cut -d'.' -f1,2)
               git clone --depth=1 https://github.com/torvalds/linux.git -b "v${KVER}" /tmp/linux-src || \
               git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
@@ -49,15 +53,6 @@ jobs:
 
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
-          sudo ls -la /dev/binder /dev/hwbinder /dev/vndbinder /dev/binderfs/
-
-      - name: Install Desktop Environment, Weston, Mesa & noVNC
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-terminal dbus-x11 \
-            weston xwayland mesa-utils libgl1-mesa-dri iptables dnsmasq pulseaudio \
-            tigervnc-standalone-server tigervnc-common \
-            novnc websockify python3-numpy net-tools
 
       - name: Fix Host Networking & Forwarding for Waydroid Internet
         run: |
@@ -66,15 +61,20 @@ jobs:
           sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
           sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
 
-      - name: Download Latest Reqable Android x86_64 APK
+      - name: Restore Waydroid & libhoudini Cache
+        id: cache-waydroid
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/waydroid-cache
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v2
+
+      - name: Download Latest Reqable Android x86_64 APK (16x Parallel)
         run: |
           mkdir -p /tmp/apks
           PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
           APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
-
-          if [ -z "$APK_URL" ]; then
-            APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
-          fi
+          [ -z "$APK_URL" ] && APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
 
           if [ -z "$APK_URL" ]; then
             REL_HTML=$(curl -sL "https://github.com/reqable/reqable-app/releases")
@@ -84,23 +84,57 @@ jobs:
           fi
 
           if [ -n "$APK_URL" ]; then
-            echo "Downloading Reqable APK from: $APK_URL"
-            wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
+            aria2c -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
           fi
 
-          ls -lh /tmp/apks/ || true
-
-      - name: Install & Configure Waydroid (GAPPS + ARM64 libhoudini + CPU Rendering)
+      - name: Ultra-Fast Waydroid Setup (16x Parallel aria2c + ARM64 libhoudini)
         run: |
           curl -s https://repo.waydro.id | sudo bash
-          sudo apt-get install -y waydroid
-          sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+          sudo apt-get install -y -qq waydroid
+          mkdir -p /tmp/waydroid-cache
+          sudo mkdir -p /usr/share/waydroid-extra/images /var/lib/waydroid/images
 
-          # Install ARM64/ARM32 translation layer (libhoudini)
-          git clone --depth=1 https://github.com/casualsnek/waydroid_script /tmp/waydroid_script
-          python3 -m venv /tmp/waydroid_script/venv
-          /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
-          sudo /tmp/waydroid_script/venv/bin/python3 /tmp/waydroid_script/main.py install libhoudini
+          if [ -f /tmp/waydroid-cache/system.img ] && [ -f /tmp/waydroid-cache/vendor.img ]; then
+            echo "⚡ Restoring pre-built Waydroid + libhoudini images from cache..."
+            sudo cp /tmp/waydroid-cache/system.img /usr/share/waydroid-extra/images/
+            sudo cp /tmp/waydroid-cache/vendor.img /usr/share/waydroid-extra/images/
+            sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+            [ -f /tmp/waydroid-cache/overlay.tar.gz ] && sudo tar -xzf /tmp/waydroid-cache/overlay.tar.gz -C /var/lib/waydroid
+          else
+            echo "⚡ Fetching Waydroid OTA manifest for 16-connection parallel download..."
+            SYS_JSON=$(curl -sL "https://ota.waydro.id/system/lineage/waydroid_x86_64/${{ github.event.inputs.android_type }}.json")
+            VEN_JSON=$(curl -sL "https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json")
+
+            SYS_URL=$(echo "$SYS_JSON" | jq -r '.response[0].url')
+            VEN_URL=$(echo "$VEN_JSON" | jq -r '.response[0].url')
+
+            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o system.zip "$SYS_URL"
+            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o vendor.zip "$VEN_URL"
+
+            sudo unzip -q -o /tmp/system.zip -d /usr/share/waydroid-extra/images/
+            sudo unzip -q -o /tmp/vendor.zip -d /usr/share/waydroid-extra/images/
+            rm -f /tmp/system.zip /tmp/vendor.zip
+
+            sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+
+            # Pre-download libhoudini via 16x aria2c so waydroid_script finishes in seconds
+            mkdir -p ~/.cache/waydroid-script/downloads
+            HOUDINI_URL="https://github.com/supremegamers/vendor_intel_proprietary_houdini/archive/812422136f22789438f7344f1210485d54d409c8.zip"
+            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d ~/.cache/waydroid-script/downloads -o "812422136f22789438f7344f1210485d54d409c8.zip" "$HOUDINI_URL" || true
+
+            git clone --depth=1 https://github.com/casualsnek/waydroid_script /tmp/waydroid_script
+            python3 -m venv /tmp/waydroid_script/venv
+            /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
+            sudo mkdir -p /root/.cache/waydroid-script/downloads
+            sudo cp ~/.cache/waydroid-script/downloads/* /root/.cache/waydroid-script/downloads/ 2>/dev/null || true
+            sudo /tmp/waydroid_script/venv/bin/python3 /tmp/waydroid_script/main.py install libhoudini
+
+            # Save everything to cache for instant 1-minute future runs
+            sudo cp /var/lib/waydroid/images/system.img /tmp/waydroid-cache/
+            sudo cp /var/lib/waydroid/images/vendor.img /tmp/waydroid-cache/
+            sudo tar -czf /tmp/waydroid-cache/overlay.tar.gz -C /var/lib/waydroid overlay 2>/dev/null || true
+            sudo chown -R $USER:$USER /tmp/waydroid-cache
+          fi
 
           # Force CPU rendering (SwiftShader / default gralloc)
           sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
@@ -123,7 +157,6 @@ jobs:
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # Script to convert & install any exported .0/.crt/.pem/.p12 from Android Download into System CA
           cat << 'EOF' > ~/Desktop/install-cert-to-system.sh
           #!/bin/bash
           EXPORT_DIR="$HOME/exported-certs"
@@ -198,7 +231,6 @@ jobs:
 
       - name: Configure Separate Android-Only Display (:2) & Full Linux Display (:1)
         run: |
-          # Script to launch Fullscreen Android-Only on Display :2 (Weston runs in foreground)
           cat << 'EOF' > ~/Desktop/start-android-only.sh
           #!/bin/bash
           export DISPLAY=:2
@@ -220,7 +252,6 @@ jobs:
           sudo systemctl restart waydroid-container
           sleep 2
 
-          # Background launcher for Waydroid UI + Reqable APK + Conscrypt CA sync once Weston socket appears
           (
             for i in {1..20}; do
               SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
@@ -235,7 +266,6 @@ jobs:
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
                 sudo waydroid shell settings put global captive_portal_mode 0
                 if [ -f /tmp/apks/reqable.apk ]; then
-                  echo "Installing Reqable APK into Android..." >> /tmp/waydroid-ui.log
                   waydroid app install /tmp/apks/reqable.apk >> /tmp/waydroid-ui.log 2>&1 || true
                 fi
                 sudo waydroid shell sh -c '
@@ -252,13 +282,11 @@ jobs:
             done
           ) &
 
-          # Run Weston in foreground so Xtigervnc :2 stays alive without needing openbox/xterm
           exec weston --backend=x11-backend.so --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1
           EOF
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
 
-          # Display :1 xstartup (Full Linux Desktop)
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
           unset SESSION_MANAGER
@@ -273,7 +301,6 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
-          # Display :2 xstartup (Dedicated Fullscreen Android-Only session)
           cat << 'EOF' > ~/.vnc/xstartup-android
           #!/bin/bash
           unset SESSION_MANAGER
@@ -309,7 +336,6 @@ jobs:
           nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared-linux.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared-cert.log 2>&1 &
           
-          echo "Waiting for TryCloudflare URLs..."
           ANDROID_URL=""
           LINUX_URL=""
           CERT_URL=""
