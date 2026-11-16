@@ -69,7 +69,6 @@ jobs:
       - name: Download Latest Reqable Android x86_64 APK
         run: |
           mkdir -p /tmp/apks
-          # 1. Scrape official Reqable download page directly for the latest x86_64/universal APK URL
           PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
           APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
 
@@ -77,7 +76,6 @@ jobs:
             APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
           fi
 
-          # 2. Fallback to GitHub releases HTML if scraping reqable.com yields empty
           if [ -z "$APK_URL" ]; then
             REL_HTML=$(curl -sL "https://github.com/reqable/reqable-app/releases")
             REL_PATH=$(echo "$REL_HTML" | grep -oE '/reqable/reqable-app/releases/download/[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
@@ -88,8 +86,6 @@ jobs:
           if [ -n "$APK_URL" ]; then
             echo "Downloading Reqable APK from: $APK_URL"
             wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
-          else
-            echo "Warning: Could not auto-fetch Reqable APK URL; skipping pre-install."
           fi
 
           ls -lh /tmp/apks/ || true
@@ -100,7 +96,7 @@ jobs:
           sudo apt-get install -y waydroid
           sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
 
-          # Install ARM64/ARM32 translation layer (libhoudini) so Zedge & mobile apps run
+          # Install ARM64/ARM32 translation layer (libhoudini)
           git clone --depth=1 https://github.com/casualsnek/waydroid_script /tmp/waydroid_script
           python3 -m venv /tmp/waydroid_script/venv
           /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
@@ -122,17 +118,10 @@ jobs:
 
       - name: Setup Auto-CA Installer & Certificate Export Web Server
         run: |
-          mkdir -p ~/exported-certs ~/Desktop ~/.vnc ~/.config/weston
+          mkdir -p ~/exported-certs ~/Desktop ~/.vnc
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-
-          # Configure Weston Kiosk mode for Android-only screen (hides top panel/bars)
-          cat << 'EOF' > ~/.config/weston.ini
-          [core]
-          shell=kiosk-shell.so
-          EOF
-          sed -i 's/^[[:space:]]*//' ~/.config/weston.ini
 
           # Script to convert & install any exported .0/.crt/.pem/.p12 from Android Download into System CA
           cat << 'EOF' > ~/Desktop/install-cert-to-system.sh
@@ -209,6 +198,7 @@ jobs:
 
       - name: Configure Separate Android-Only Display (:2) & Full Linux Display (:1)
         run: |
+          # Script to launch Fullscreen Android-Only on Display :2 (Standard Weston fullscreen)
           cat << 'EOF' > ~/Desktop/start-android-only.sh
           #!/bin/bash
           export DISPLAY=:2
@@ -230,7 +220,8 @@ jobs:
           sudo systemctl restart waydroid-container
           sleep 2
 
-          weston --backend=x11-backend.so --config="$HOME/.config/weston.ini" --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1 &
+          # Start Weston fullscreen without broken kiosk-shell.so
+          weston --backend=x11-backend.so --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1 &
           for i in {1..15}; do
             SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
             [ -n "$SOCK" ] && break
@@ -265,6 +256,7 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
 
+          # Display :1 xstartup (Full Linux Desktop)
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
           unset SESSION_MANAGER
@@ -279,6 +271,7 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
+          # Display :2 xstartup (Dedicated Fullscreen Android-Only session)
           cat << 'EOF' > ~/.vnc/xstartup-android
           #!/bin/bash
           unset SESSION_MANAGER
@@ -288,8 +281,8 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
-          ~/Desktop/start-android-only.sh
-          sleep infinity
+          (sleep 2 && ~/Desktop/start-android-only.sh) &
+          exec openbox || exec xterm
           EOF
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup-android
           chmod +x ~/.vnc/xstartup-android
