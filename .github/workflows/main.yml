@@ -1,0 +1,159 @@
+name: Waydroid Root in Browser (Cloudflare Tunnel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_duration:
+        description: 'Keep session alive (in minutes, max 350)'
+        required: true
+        default: '180'
+      android_type:
+        description: 'Android Image Type (VANILLA or GAPPS)'
+        required: true
+        default: 'VANILLA'
+
+jobs:
+  run-waydroid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Install Dependencies & Build Binder Kernel Module
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget git lsb-release ca-certificates gnupg \
+            software-properties-common build-essential linux-headers-$(uname -r)
+
+          if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
+            echo "Building binder_linux directly for kernel $(uname -r)..."
+            KVER=$(uname -r | cut -d'-' -f1 | cut -d'.' -f1,2)
+            git clone --depth=1 https://github.com/torvalds/linux.git -b "v${KVER}" /tmp/linux-src || \
+            git clone --depth=1 https://github.com/torvalds/linux.git /tmp/linux-src
+
+            cd /tmp/linux-src/drivers/android
+            printf "obj-m += binder_linux.o\nbinder_linux-y := binder.o binder_alloc.o\nccflags-y += -DCONFIG_ANDROID_BINDERFS -DCONFIG_ANDROID_BINDER_IPC\n" > Makefile
+            make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+            sudo insmod binder_linux.ko devices="binder,hwbinder,vndbinder"
+          fi
+
+          if [ ! -e /dev/binder ]; then
+            sudo mkdir -p /dev/binderfs
+            sudo mount -t binder binder /dev/binderfs || true
+            sudo ln -sf /dev/binderfs/* /dev/ 2>/dev/null || true
+          fi
+
+          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
+          ls -la /dev/binder*
+
+      - name: Install Desktop Environment, Weston, Mesa & noVNC
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-terminal dbus-x11 \
+            weston xwayland mesa-utils libgl1-mesa-dri iptables dnsmasq pulseaudio \
+            tigervnc-standalone-server tigervnc-common \
+            novnc websockify python3-numpy net-tools
+
+      - name: Install & Configure Waydroid (CPU-Only Software Rendering)
+        run: |
+          curl -s https://repo.waydro.id | sudo bash
+          sudo apt-get install -y waydroid
+          sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+
+          # Force CPU rendering (SwiftShader / default gralloc) for headless GitHub runners
+          sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
+          sudo sed -i '/ro.hardware.egl/d' /var/lib/waydroid/waydroid.cfg
+          sudo sed -i '/persist.waydroid.udev/d' /var/lib/waydroid/waydroid.cfg
+
+          cat << 'EOF' | sudo tee -a /var/lib/waydroid/waydroid.cfg > /dev/null
+          ro.hardware.gralloc=default
+          ro.hardware.egl=swiftshader
+          persist.waydroid.udev=false
+          EOF
+
+          # Fix LXC container apparmor & permissions on Azure runners
+          sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
+          sudo waydroid upgrade -o
+
+      - name: Configure VNC, Autostart Waydroid & PulseAudio Socket
+        run: |
+          mkdir -p ~/.vnc ~/Desktop
+          touch ~/.Xauthority
+          echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+
+          # Auto-detect Weston Wayland socket, create dummy pulse socket & launch Waydroid
+          cat << 'EOF' > ~/Desktop/start-waydroid.sh
+          #!/bin/bash
+          export XDG_RUNTIME_DIR=/tmp/runtime-runner
+          export LIBGL_ALWAYS_SOFTWARE=1
+          mkdir -p "$XDG_RUNTIME_DIR/pulse"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          touch "$XDG_RUNTIME_DIR/pulse/native"
+          sudo chmod 666 /dev/binder* /dev/binderfs/* 2>/dev/null || true
+
+          pkill -f weston || true
+          rm -f "$XDG_RUNTIME_DIR"/wayland-*
+          sudo systemctl restart waydroid-container
+          sleep 2
+
+          weston --backend=x11-backend.so --width=1280 --height=720 > /tmp/weston.log 2>&1 &
+          for i in {1..15}; do
+            SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
+            [ -n "$SOCK" ] && break
+            sleep 1
+          done
+
+          export WAYLAND_DISPLAY=$(basename "$SOCK")
+          echo "Launching Waydroid on $WAYLAND_DISPLAY..." > /tmp/waydroid-ui.log
+          waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/Desktop/start-waydroid.sh
+          chmod +x ~/Desktop/start-waydroid.sh
+
+          cat << 'EOF' > ~/.vnc/xstartup
+          #!/bin/bash
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          export XDG_RUNTIME_DIR=/tmp/runtime-runner
+          export LIBGL_ALWAYS_SOFTWARE=1
+          mkdir -p "$XDG_RUNTIME_DIR/pulse"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          touch "$XDG_RUNTIME_DIR/pulse/native"
+          (sleep 4 && ~/Desktop/start-waydroid.sh) &
+          exec dbus-launch --exit-with-session startxfce4
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start Waydroid Container, VNC & noVNC
+        run: |
+          sudo systemctl enable --now waydroid-container
+          vncserver :1 -geometry 1366x768 -depth 24 -localhost no
+          nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
+          sleep 5
+
+      - name: Start Cloudflare Quick Tunnel (trycloudflare.com)
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
+          
+          echo "Waiting for TryCloudflare URL..."
+          for i in {1..30}; do
+            URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1)
+            if [ -n "$URL" ]; then
+              echo "=========================================================="
+              echo "🚀 ACCESS LINUX & WAYDROID IN BROWSER:"
+              echo "${URL}/vnc.html?autoconnect=true&resize=scale"
+              echo "🔑 VNC Password: waydroid123"
+              echo "=========================================================="
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Keep Session Alive
+        run: |
+          echo "Session active for ${{ github.event.inputs.session_duration }} minutes."
+          sleep $(( ${{ github.event.inputs.session_duration }} * 60 ))
