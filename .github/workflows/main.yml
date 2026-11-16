@@ -69,17 +69,30 @@ jobs:
       - name: Download Latest Reqable Android x86_64 APK
         run: |
           mkdir -p /tmp/apks
-          APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
-            jq -r '.assets[] | select(.name | test("android.*(x86_64|universal).*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
+          # 1. Scrape official Reqable download page directly for the latest x86_64/universal APK URL
+          PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
+          APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
 
           if [ -z "$APK_URL" ]; then
-            APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
-              jq -r '.assets[] | select(.name | test("\\.apk$"; "i")) | .browser_download_url' | head -n 1)
+            APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
           fi
 
-          echo "Downloading Reqable APK from: $APK_URL"
-          wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL"
-          ls -lh /tmp/apks/reqable.apk
+          # 2. Fallback to GitHub releases HTML if scraping reqable.com yields empty
+          if [ -z "$APK_URL" ]; then
+            REL_HTML=$(curl -sL "https://github.com/reqable/reqable-app/releases")
+            REL_PATH=$(echo "$REL_HTML" | grep -oE '/reqable/reqable-app/releases/download/[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
+            [ -z "$REL_PATH" ] && REL_PATH=$(echo "$REL_HTML" | grep -oE '/reqable/reqable-app/releases/download/[^"'\'' ]+\.apk' | head -n 1)
+            [ -n "$REL_PATH" ] && APK_URL="https://github.com${REL_PATH}"
+          fi
+
+          if [ -n "$APK_URL" ]; then
+            echo "Downloading Reqable APK from: $APK_URL"
+            wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
+          else
+            echo "Warning: Could not auto-fetch Reqable APK URL; skipping pre-install."
+          fi
+
+          ls -lh /tmp/apks/ || true
 
       - name: Install & Configure Waydroid (GAPPS + ARM64 libhoudini + CPU Rendering)
         run: |
