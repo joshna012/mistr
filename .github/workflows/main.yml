@@ -198,7 +198,7 @@ jobs:
 
       - name: Configure Separate Android-Only Display (:2) & Full Linux Display (:1)
         run: |
-          # Script to launch Fullscreen Android-Only on Display :2 (Standard Weston fullscreen)
+          # Script to launch Fullscreen Android-Only on Display :2 (Weston runs in foreground)
           cat << 'EOF' > ~/Desktop/start-android-only.sh
           #!/bin/bash
           export DISPLAY=:2
@@ -220,18 +220,17 @@ jobs:
           sudo systemctl restart waydroid-container
           sleep 2
 
-          # Start Weston fullscreen without broken kiosk-shell.so
-          weston --backend=x11-backend.so --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1 &
-          for i in {1..15}; do
-            SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
-            [ -n "$SOCK" ] && break
-            sleep 1
-          done
-
-          export WAYLAND_DISPLAY=$(basename "$SOCK")
-          waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
-
+          # Background launcher for Waydroid UI + Reqable APK + Conscrypt CA sync once Weston socket appears
           (
+            for i in {1..20}; do
+              SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
+              [ -n "$SOCK" ] && break
+              sleep 1
+            done
+
+            export WAYLAND_DISPLAY=$(basename "$SOCK")
+            waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
+
             for i in {1..45}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
                 sudo waydroid shell settings put global captive_portal_mode 0
@@ -252,6 +251,9 @@ jobs:
               sleep 2
             done
           ) &
+
+          # Run Weston in foreground so Xtigervnc :2 stays alive without needing openbox/xterm
+          exec weston --backend=x11-backend.so --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1
           EOF
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
@@ -281,8 +283,7 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
-          (sleep 2 && ~/Desktop/start-android-only.sh) &
-          exec openbox || exec xterm
+          exec ~/Desktop/start-android-only.sh
           EOF
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup-android
           chmod +x ~/.vnc/xstartup-android
