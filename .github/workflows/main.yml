@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (Cloudflare Tunnel + GAPPS + Reqable Pre-installed)
+name: Waydroid Root in Browser (GAPPS + ARM64 libhoudini + Reqable)
 
 on:
   workflow_dispatch:
@@ -22,7 +22,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl wget git jq lsb-release ca-certificates gnupg \
-            software-properties-common build-essential linux-headers-$(uname -r) openssl inotify-tools
+            software-properties-common build-essential linux-headers-$(uname -r) openssl inotify-tools \
+            python3-venv python3-pip lzip
 
           if [ ! -e /dev/binder ] && [ ! -e /dev/binderfs/binder ]; then
             if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
@@ -80,11 +81,17 @@ jobs:
           wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL"
           ls -lh /tmp/apks/reqable.apk
 
-      - name: Install & Configure Waydroid (GAPPS + CPU-Only Rendering)
+      - name: Install & Configure Waydroid (GAPPS + ARM64 libhoudini + CPU Rendering)
         run: |
           curl -s https://repo.waydro.id | sudo bash
           sudo apt-get install -y waydroid
           sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
+
+          # Install ARM64/ARM32 translation layer (libhoudini) so Zedge & mobile apps run
+          git clone --depth=1 https://github.com/casualsnek/waydroid_script /tmp/waydroid_script
+          python3 -m venv /tmp/waydroid_script/venv
+          /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
+          sudo /tmp/waydroid_script/venv/bin/python3 /tmp/waydroid_script/main.py install libhoudini
 
           # Force CPU rendering (SwiftShader / default gralloc)
           sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
@@ -102,12 +109,19 @@ jobs:
 
       - name: Setup Auto-CA Installer & Certificate Export Web Server
         run: |
-          mkdir -p ~/exported-certs ~/Desktop ~/.vnc
+          mkdir -p ~/exported-certs ~/Desktop ~/.vnc ~/.config/weston
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # Script to convert & install any exported .crt/.pem from Android Download into System CA
+          # Configure Weston Kiosk mode for Android-only screen (hides top panel/bars)
+          cat << 'EOF' > ~/.config/weston.ini
+          [core]
+          shell=kiosk-shell.so
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/.config/weston.ini
+
+          # Script to convert & install any exported .0/.crt/.pem/.p12 from Android Download into System CA
           cat << 'EOF' > ~/Desktop/install-cert-to-system.sh
           #!/bin/bash
           EXPORT_DIR="$HOME/exported-certs"
@@ -136,7 +150,7 @@ jobs:
             sudo cp "$FILE" "$EXPORT_DIR/$BASENAME"
             sudo chown $USER:$USER "$EXPORT_DIR/$BASENAME"
 
-            if [[ "$BASENAME" == *.crt || "$BASENAME" == *.pem || "$BASENAME" == *.cer ]]; then
+            if [[ "$BASENAME" == *.0 || "$BASENAME" == *.crt || "$BASENAME" == *.pem || "$BASENAME" == *.cer ]]; then
               openssl x509 -inform PEM -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || \
               openssl x509 -inform DER -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || return
 
@@ -153,13 +167,13 @@ jobs:
             fi
           }
 
-          sudo find "$ANDROID_DL" -maxdepth 2 -type f \( -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) 2>/dev/null | while read -r f; do
+          sudo find "$ANDROID_DL" -maxdepth 3 -type f \( -name "*.0" -o -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) 2>/dev/null | while read -r f; do
             process_file "$f"
           done
 
           while true; do
             if sudo test -d "$ANDROID_DL"; then
-              sudo find "$ANDROID_DL" -maxdepth 2 -type f \( -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) -mmin -2 2>/dev/null | while read -r f; do
+              sudo find "$ANDROID_DL" -maxdepth 3 -type f \( -name "*.0" -o -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) -mmin -2 2>/dev/null | while read -r f; do
                 process_file "$f"
               done
             fi
@@ -174,16 +188,17 @@ jobs:
           cat << 'EOF' > ~/exported-certs/README.txt
           Exported Android Certificates & Files Server
           1. Open the pre-installed Reqable app in Android.
-          2. Go to Certificate Management -> Export CA Public Certificate (.crt) or Export (.p12).
-          3. Refresh this page within 3 seconds to download the .crt, .p12, and auto-generated Android System <hash>.0 file!
+          2. Go to Certificate Management -> Export CA Public Certificate (.crt), Export (.p12), or Install CA Certificate to Local-Machine (.0).
+          3. Refresh this page within 3 seconds to download the exported certificate and Android System <hash>.0 file!
           4. The certificate is also automatically installed as a System Trusted Credential in Waydroid.
           EOF
           nohup python3 -m http.server 8090 --directory ~/exported-certs > /tmp/cert-server.log 2>&1 &
 
-      - name: Configure VNC & Autostart Waydroid (With Auto Reqable APK Install)
+      - name: Configure Separate Android-Only Display (:2) & Full Linux Display (:1)
         run: |
-          cat << 'EOF' > ~/Desktop/start-waydroid.sh
+          cat << 'EOF' > ~/Desktop/start-android-only.sh
           #!/bin/bash
+          export DISPLAY=:2
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
           export LIBGL_ALWAYS_SOFTWARE=1
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
@@ -202,7 +217,7 @@ jobs:
           sudo systemctl restart waydroid-container
           sleep 2
 
-          weston --backend=x11-backend.so --width=1280 --height=720 > /tmp/weston.log 2>&1 &
+          weston --backend=x11-backend.so --config="$HOME/.config/weston.ini" --fullscreen --width=1280 --height=720 > /tmp/weston.log 2>&1 &
           for i in {1..15}; do
             SOCK=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n 1)
             [ -n "$SOCK" ] && break
@@ -212,7 +227,6 @@ jobs:
           export WAYLAND_DISPLAY=$(basename "$SOCK")
           waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
 
-          # Wait for Android boot, install Reqable APK automatically & sync CA
           (
             for i in {1..45}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
@@ -235,8 +249,8 @@ jobs:
             done
           ) &
           EOF
-          sed -i 's/^[[:space:]]*//' ~/Desktop/start-waydroid.sh
-          chmod +x ~/Desktop/start-waydroid.sh
+          sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
+          chmod +x ~/Desktop/start-android-only.sh
 
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
@@ -247,45 +261,71 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
-          (sleep 4 && ~/Desktop/start-waydroid.sh) &
           exec dbus-launch --exit-with-session startxfce4
           EOF
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
-      - name: Start Waydroid Container, VNC & noVNC
+          cat << 'EOF' > ~/.vnc/xstartup-android
+          #!/bin/bash
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          export XDG_RUNTIME_DIR=/tmp/runtime-runner
+          export LIBGL_ALWAYS_SOFTWARE=1
+          mkdir -p "$XDG_RUNTIME_DIR/pulse"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          touch "$XDG_RUNTIME_DIR/pulse/native"
+          ~/Desktop/start-android-only.sh
+          sleep infinity
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup-android
+          chmod +x ~/.vnc/xstartup-android
+
+      - name: Start Waydroid Container, Dual VNC (:1 Linux & :2 Android) & noVNC
         run: |
           sudo systemctl enable --now waydroid-container
-          vncserver :1 -geometry 1366x768 -depth 24 -localhost no
-          nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
+
+          vncserver :1 -geometry 1366x768 -depth 24 -localhost no -xstartup ~/.vnc/xstartup
+          nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc-linux.log 2>&1 &
+
+          vncserver :2 -geometry 1280x720 -depth 24 -localhost no -xstartup ~/.vnc/xstartup-android
+          nohup websockify --web=/usr/share/novnc/ 6081 localhost:5902 > /tmp/novnc-android.log 2>&1 &
+
           sleep 5
 
-      - name: Start Dual Cloudflare Tunnels (Browser Desktop + Cert Export Server)
+      - name: Start 3 Cloudflare Tunnels (Android-Only + Full Linux + Cert Export)
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared-vnc.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:6081 > /tmp/cloudflared-android.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared-linux.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared-cert.log 2>&1 &
           
           echo "Waiting for TryCloudflare URLs..."
-          VNC_URL=""
+          ANDROID_URL=""
+          LINUX_URL=""
           CERT_URL=""
           for i in {1..30}; do
-            [ -z "$VNC_URL" ] && VNC_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-vnc.log | head -n 1)
+            [ -z "$ANDROID_URL" ] && ANDROID_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-android.log | head -n 1)
+            [ -z "$LINUX_URL" ] && LINUX_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-linux.log | head -n 1)
             [ -z "$CERT_URL" ] && CERT_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-cert.log | head -n 1)
-            if [ -n "$VNC_URL" ] && [ -n "$CERT_URL" ]; then
+            if [ -n "$ANDROID_URL" ] && [ -n "$LINUX_URL" ] && [ -n "$CERT_URL" ]; then
               break
             fi
             sleep 2
           done
 
           echo "======================================================================"
-          echo "🖥️  1. ACCESS LINUX & WAYDROID IN BROWSER:"
-          echo "    ${VNC_URL}/vnc.html?autoconnect=true&resize=scale"
-          echo "    🔑 VNC Password: waydroid123"
+          echo "📱 1. PURE ANDROID ONLY (Fullscreen, No Linux Desktop):"
+          echo "    ${ANDROID_URL}/vnc.html?autoconnect=true&resize=scale"
+          echo "    🔑 Password: waydroid123"
           echo ""
-          echo "📥 2. DOWNLOAD / EXPORT CERTIFICATES & FILES URL:"
+          echo "🐧 2. FULL LINUX ROOT DESKTOP (Terminal & System Management):"
+          echo "    ${LINUX_URL}/vnc.html?autoconnect=true&resize=scale"
+          echo "    🔑 Password: waydroid123"
+          echo ""
+          echo "📥 3. CERTIFICATE & FILE DOWNLOAD SERVER:"
           echo "    ${CERT_URL}/"
           echo "======================================================================"
 
