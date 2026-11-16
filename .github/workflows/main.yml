@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (Cloudflare Tunnel)
+name: Waydroid Root in Browser (Cloudflare Tunnel + Reqable Pre-installed)
 
 on:
   workflow_dispatch:
@@ -21,8 +21,8 @@ jobs:
       - name: Install Dependencies & Setup Binder Kernel Module
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget git lsb-release ca-certificates gnupg \
-            software-properties-common build-essential linux-headers-$(uname -r) openssl
+          sudo apt-get install -y curl wget git jq lsb-release ca-certificates gnupg \
+            software-properties-common build-essential linux-headers-$(uname -r) openssl inotify-tools
 
           if [ ! -e /dev/binder ] && [ ! -e /dev/binderfs/binder ]; then
             if ! sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
@@ -65,13 +65,30 @@ jobs:
           sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
           sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
 
-      - name: Install & Configure Waydroid + Reqable System CA Certificate
+      - name: Download Latest Reqable Android x86_64 APK
+        run: |
+          mkdir -p /tmp/apks
+          # Fetch latest x86_64 (or universal) Android APK from Reqable's official GitHub releases
+          APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
+            jq -r '.assets[] | select(.name | test("android.*(x86_64|universal).*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
+
+          if [ -z "$APK_URL" ]; then
+            # Fallback to any android .apk asset if naming pattern differs
+            APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
+              jq -r '.assets[] | select(.name | test("\\.apk$"; "i")) | .browser_download_url' | head -n 1)
+          fi
+
+          echo "Downloading Reqable APK from: $APK_URL"
+          wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL"
+          ls -lh /tmp/apks/reqable.apk
+
+      - name: Install & Configure Waydroid (CPU-Only Software Rendering)
         run: |
           curl -s https://repo.waydro.id | sudo bash
           sudo apt-get install -y waydroid
           sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
 
-          # Force CPU rendering (SwiftShader / default gralloc) for headless GitHub runners
+          # Force CPU rendering (SwiftShader / default gralloc)
           sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
           sudo sed -i '/ro.hardware.egl/d' /var/lib/waydroid/waydroid.cfg
           sudo sed -i '/persist.waydroid.udev/d' /var/lib/waydroid/waydroid.cfg
@@ -82,62 +99,91 @@ jobs:
           persist.waydroid.udev=false
           EOF
 
-          # Fix LXC container apparmor & permissions on cloud runners
           sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
-
-          # Save Reqable Root CA Certificate and compute Android system hash
-          cat << 'EOF' > /tmp/reqable.pem
-          -----BEGIN CERTIFICATE-----
-          MIIFDzCCA/egAwIBAgIUOkl2iSzmLNvVqAPLtLk5WxAWItAwDQYJKoZIhvcNAQEL
-          BQAwgZQxCzAJBgNVBAYTAkNOMREwDwYDVQQIDAhTaGFuZ2hhaTERMA8GA1UEBwwI
-          U2hhbmdoYWkxFTATBgNVBAoMDFJlcWFibGUsIExMQzFIMBsGA1UECwwUaHR0cHM6
-          Ly9yZXFhYmxlLmNvbS8wKQYDVQQDDCJSZXFhYmxlIENBIChOb3YgNiwgMjAyNiwg
-          QTdENTEyQUIpMB4XDTI2MTEwNjEzNTA0OFoXDTMzMDUzMTA1NTU0NlowgZQxCzAJ
-          BgNVBAYTAkNOMREwDwYDVQQIDAhTaGFuZ2hhaTERMA8GA1UEBwwIU2hhbmdoYWkx
-          FTATBgNVBAoMDFJlcWFibGUsIExMQzFIMBsGA1UECwwUaHR0cHM6Ly9yZXFhYmxl
-          LmNvbS8wKQYDVQQDDCJSZXFhYmxlIENBIChOb3YgNiwgMjAyNiwgQTdENTEyQUIp
-          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyFy8dWgIapoLlCEmujbc
-          gnnxxmtpYGWgkbXyTns0FYzCybrv58Z6bzya6Rk0LesucLRZdFbibDnuwznOYjHl
-          Oiqn5peLbijXPsn4tpHs1TYhCXFEAoVb0Q9LLcOUGvGjjmFD3AKBSlUG9JfGP0Zc
-          6oQBRtNuPqMMSl5lm2izevCP0lyYJLe7pkjiaiejR2dAlEUujPnm9bhwmZebGykO
-          C9sUCwHUIqTC0aZWOzNKypD5sWHvoNpF+qSCXpZ1ZecLW4H8P0GkGWaBmAtdX2Df
-          EMGf1Lmf97lWewfb9OPGmT2IhhQLoBNhoTMIsPVAlN0sw87aD9ENNUuOfP9kqncp
-          cwIDAQABo4IBVTCCAVEwHQYDVR0OBBYEFPKRkjP/NBFUWDG3x0Xn6b9pW2SWMB8G
-          A1UdIwQYMBaAFPKRkjP/NBFUWDG3x0Xn6b9pW2SWMA8GA1UdEwEB/wQFMAMBAf8w
-          DgYDVR0PAQH/BAQDAgIEMIHtBglghkgBhvhCAQ0Egd8WgdxUaGlzIFJvb3QgY2Vy
-          dGlmaWNhdGUgd2FzIGdlbmVyYXRlZCBieSBSZXFhYmxlIFByb3h5IGZvciBTU0wg
-          UHJveHlpbmcuIElmIHRoaXMgY2VydGlmaWNhdGUgaXMgcGFydCBvZiBhIGNlcnRp
-          ZmljYXRlIGNoYWluLCB0aGlzIG1lYW5zIHRoYXQgeW91J3JlIGJyb3dzaW5nIHRo
-          cm91Z2ggUmVxYWJsZSBQcm94eSB3aXRoIFNTTCBQcm94eWluZyBlbmFibGVkIGZv
-          ciB0aGlzIHdlYnNpdGUuMA0GCSqGSIb3DQEBCwUAA4IBAQBa8u0QFGBnm23C0Fi2
-          66jX5kqhM1T5tDRnruaDJFfQOebIU5VzOSP0V8uJFhIZmkrZDJFeK2kz25ObgoJT
-          oGIims/vNSvdQa7pB4F5za7hIGLiCepbbTJ/rwo5JYs2V5n9nXNovOgRlI/CaCgJ
-          p/EI8II4KOiIaPSlHm0ep5biYXQS0ZOrYyEAOaf+5XSn6dn693b8spXT3Mn0ntM4
-          Ifek0WTuB0tt/kKKfBtrHgB+/JybrnSSdlN/H2qgfpMd9pFlHcZDY5V3s3WDEqfX
-          VS8R2v36zsyroI3WzF/tTPwuuSR9X9fb6RHOLGoe7tW6p5MNcqzedGZdciMyvc3k
-          3ov/
-          -----END CERTIFICATE-----
-          EOF
-          sed -i 's/^[[:space:]]*//' /tmp/reqable.pem
-
-          CERT_HASH=$(openssl x509 -inform PEM -subject_hash_old -in /tmp/reqable.pem | head -1)
-          echo "Installing Reqable System CA as ${CERT_HASH}.0..."
-
-          sudo mkdir -p /var/lib/waydroid/overlay/system/etc/security/cacerts
-          sudo cp /tmp/reqable.pem "/var/lib/waydroid/overlay/system/etc/security/cacerts/${CERT_HASH}.0"
-          sudo chown -R root:root /var/lib/waydroid/overlay/system/etc/security/cacerts
-          sudo chmod 644 "/var/lib/waydroid/overlay/system/etc/security/cacerts/${CERT_HASH}.0"
-
           sudo waydroid upgrade -o
 
-      - name: Configure VNC, Autostart Waydroid, Internet NAT & Conscrypt CA Sync
+      - name: Setup Auto-CA Installer & Certificate Export Web Server
         run: |
-          mkdir -p ~/.vnc ~/Desktop
+          mkdir -p ~/exported-certs ~/Desktop ~/.vnc
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # Auto-detect Weston Wayland socket, fix NAT routing, launch Waydroid & sync CA
+          # Script to convert & install any exported .crt/.pem from Android Download into System CA
+          cat << 'EOF' > ~/Desktop/install-cert-to-system.sh
+          #!/bin/bash
+          EXPORT_DIR="$HOME/exported-certs"
+          ANDROID_DL="/var/lib/waydroid/data/media/0/Download"
+          mkdir -p "$EXPORT_DIR"
+          sudo mkdir -p /var/lib/waydroid/overlay/system/etc/security/cacerts
+
+          sync_conscrypt() {
+            if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
+              sudo waydroid shell sh -c '
+                umount /apex/com.android.conscrypt/cacerts 2>/dev/null || true
+                mkdir -p /tmp/cacerts_tmp
+                cp /apex/com.android.conscrypt/cacerts/* /tmp/cacerts_tmp/ 2>/dev/null || true
+                cp /system/etc/security/cacerts/*.0 /tmp/cacerts_tmp/ 2>/dev/null || true
+                chown -R root:root /tmp/cacerts_tmp
+                chmod 644 /tmp/cacerts_tmp/*
+                mount --bind /tmp/cacerts_tmp /apex/com.android.conscrypt/cacerts
+              '
+            fi
+          }
+
+          process_file() {
+            FILE="$1"
+            [ -f "$FILE" ] || return
+            BASENAME=$(basename "$FILE")
+            sudo cp "$FILE" "$EXPORT_DIR/$BASENAME"
+            sudo chown $USER:$USER "$EXPORT_DIR/$BASENAME"
+
+            if [[ "$BASENAME" == *.crt || "$BASENAME" == *.pem || "$BASENAME" == *.cer ]]; then
+              openssl x509 -inform PEM -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || \
+              openssl x509 -inform DER -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || return
+
+              HASH=$(openssl x509 -inform PEM -subject_hash_old -in /tmp/current_ca.pem | head -1)
+              if [ -n "$HASH" ]; then
+                sudo cp /tmp/current_ca.pem "/var/lib/waydroid/overlay/system/etc/security/cacerts/${HASH}.0"
+                sudo cp /tmp/current_ca.pem "$EXPORT_DIR/${HASH}.0"
+                sudo chown -R root:root /var/lib/waydroid/overlay/system/etc/security/cacerts
+                sudo chmod 644 "/var/lib/waydroid/overlay/system/etc/security/cacerts/${HASH}.0"
+                sudo chown $USER:$USER "$EXPORT_DIR/${HASH}.0"
+                sync_conscrypt
+                echo "[$(date)] Installed System CA: ${HASH}.0 from $BASENAME" >> /tmp/ca-auto.log
+              fi
+            fi
+          }
+
+          sudo find "$ANDROID_DL" -maxdepth 2 -type f \( -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) 2>/dev/null | while read -r f; do
+            process_file "$f"
+          done
+
+          while true; do
+            if sudo test -d "$ANDROID_DL"; then
+              sudo find "$ANDROID_DL" -maxdepth 2 -type f \( -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) -mmin -2 2>/dev/null | while read -r f; do
+                process_file "$f"
+              done
+            fi
+            sleep 3
+          done
+          EOF
+          sed -i 's/^[[:space:]]*//' ~/Desktop/install-cert-to-system.sh
+          chmod +x ~/Desktop/install-cert-to-system.sh
+
+          nohup ~/Desktop/install-cert-to-system.sh > /tmp/ca-watcher.log 2>&1 &
+
+          cat << 'EOF' > ~/exported-certs/README.txt
+          Exported Android Certificates & Files Server
+          1. Open the pre-installed Reqable app in Android.
+          2. Go to Certificate Management -> Export CA Public Certificate (.crt) or Export (.p12).
+          3. Refresh this page within 3 seconds to download the .crt, .p12, and auto-generated Android System <hash>.0 file!
+          4. The certificate is also automatically installed as a System Trusted Credential in Waydroid.
+          EOF
+          nohup python3 -m http.server 8090 --directory ~/exported-certs > /tmp/cert-server.log 2>&1 &
+
+      - name: Configure VNC & Autostart Waydroid (With Auto Reqable APK Install)
+        run: |
           cat << 'EOF' > ~/Desktop/start-waydroid.sh
           #!/bin/bash
           export XDG_RUNTIME_DIR=/tmp/runtime-runner
@@ -148,7 +194,6 @@ jobs:
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
-          # Ensure Docker's iptables rules do not block Waydroid internet
           sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
           sudo iptables -P FORWARD ACCEPT
           sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
@@ -167,14 +212,17 @@ jobs:
           done
 
           export WAYLAND_DISPLAY=$(basename "$SOCK")
-          echo "Launching Waydroid on $WAYLAND_DISPLAY..." > /tmp/waydroid-ui.log
-          waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
+          waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
 
-          # Wait for Android boot, sync Reqable System CA & verify DNS/network
+          # Wait for Android boot, install Reqable APK automatically & sync CA
           (
-            for i in {1..30}; do
+            for i in {1..40}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
                 sudo waydroid shell settings put global captive_portal_mode 0
+                if [ -f /tmp/apks/reqable.apk ]; then
+                  echo "Installing Reqable APK into Android..." >> /tmp/waydroid-ui.log
+                  waydroid app install /tmp/apks/reqable.apk >> /tmp/waydroid-ui.log 2>&1 || true
+                fi
                 sudo waydroid shell sh -c '
                   mkdir -p /tmp/cacerts_tmp
                   cp /apex/com.android.conscrypt/cacerts/* /tmp/cacerts_tmp/ 2>/dev/null || true
@@ -183,7 +231,6 @@ jobs:
                   chmod 644 /tmp/cacerts_tmp/*
                   mount --bind /tmp/cacerts_tmp /apex/com.android.conscrypt/cacerts
                 '
-                echo "Reqable System CA & Internet routing configured." >> /tmp/waydroid-ui.log
                 break
               fi
               sleep 2
@@ -215,26 +262,34 @@ jobs:
           nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc.log 2>&1 &
           sleep 5
 
-      - name: Start Cloudflare Quick Tunnel (trycloudflare.com)
+      - name: Start Dual Cloudflare Tunnels (Browser Desktop + Cert Export Server)
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared-vnc.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared-cert.log 2>&1 &
           
-          echo "Waiting for TryCloudflare URL..."
+          echo "Waiting for TryCloudflare URLs..."
+          VNC_URL=""
+          CERT_URL=""
           for i in {1..30}; do
-            URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1)
-            if [ -n "$URL" ]; then
-              echo "=========================================================="
-              echo "🚀 ACCESS LINUX & WAYDROID IN BROWSER:"
-              echo "${URL}/vnc.html?autoconnect=true&resize=scale"
-              echo "🔑 VNC Password: waydroid123"
-              echo "=========================================================="
+            [ -z "$VNC_URL" ] && VNC_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-vnc.log | head -n 1)
+            [ -z "$CERT_URL" ] && CERT_URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' /tmp/cloudflared-cert.log | head -n 1)
+            if [ -n "$VNC_URL" ] && [ -n "$CERT_URL" ]; then
               break
             fi
             sleep 2
           done
+
+          echo "======================================================================"
+          echo "🖥️  1. ACCESS LINUX & WAYDROID IN BROWSER:"
+          echo "    ${VNC_URL}/vnc.html?autoconnect=true&resize=scale"
+          echo "    🔑 VNC Password: waydroid123"
+          echo ""
+          echo "📥 2. DOWNLOAD / EXPORT CERTIFICATES & FILES URL:"
+          echo "    ${CERT_URL}/"
+          echo "======================================================================"
 
       - name: Keep Session Alive
         run: |
