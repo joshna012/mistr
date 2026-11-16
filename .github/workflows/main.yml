@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (Cloudflare Tunnel + Reqable Pre-installed)
+name: Waydroid Root in Browser (Cloudflare Tunnel + GAPPS + Reqable Pre-installed)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ on:
         required: true
         default: '180'
       android_type:
-        description: 'Android Image Type (VANILLA or GAPPS)'
+        description: 'Android Image Type (GAPPS or VANILLA)'
         required: true
-        default: 'VANILLA'
+        default: 'GAPPS'
 
 jobs:
   run-waydroid:
@@ -68,12 +68,10 @@ jobs:
       - name: Download Latest Reqable Android x86_64 APK
         run: |
           mkdir -p /tmp/apks
-          # Fetch latest x86_64 (or universal) Android APK from Reqable's official GitHub releases
           APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
             jq -r '.assets[] | select(.name | test("android.*(x86_64|universal).*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
 
           if [ -z "$APK_URL" ]; then
-            # Fallback to any android .apk asset if naming pattern differs
             APK_URL=$(curl -s https://api.github.com/repos/reqable/reqable-app/releases/latest | \
               jq -r '.assets[] | select(.name | test("\\.apk$"; "i")) | .browser_download_url' | head -n 1)
           fi
@@ -82,7 +80,7 @@ jobs:
           wget -q --show-progress -O /tmp/apks/reqable.apk "$APK_URL"
           ls -lh /tmp/apks/reqable.apk
 
-      - name: Install & Configure Waydroid (CPU-Only Software Rendering)
+      - name: Install & Configure Waydroid (GAPPS + CPU-Only Rendering)
         run: |
           curl -s https://repo.waydro.id | sudo bash
           sudo apt-get install -y waydroid
@@ -216,7 +214,7 @@ jobs:
 
           # Wait for Android boot, install Reqable APK automatically & sync CA
           (
-            for i in {1..40}; do
+            for i in {1..45}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
                 sudo waydroid shell settings put global captive_portal_mode 0
                 if [ -f /tmp/apks/reqable.apk ]; then
