@@ -67,7 +67,7 @@ jobs:
         with:
           path: |
             /tmp/waydroid-cache
-          key: waydroid-fast-${{ github.event.inputs.android_type }}-v2
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v3
 
       - name: Download Latest Reqable Android x86_64 APK (16x Parallel)
         run: |
@@ -84,7 +84,7 @@ jobs:
           fi
 
           if [ -n "$APK_URL" ]; then
-            aria2c -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
+            aria2c -U "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
           fi
 
       - name: Ultra-Fast Waydroid Setup (16x Parallel aria2c + ARM64 libhoudini)
@@ -108,19 +108,23 @@ jobs:
             SYS_URL=$(echo "$SYS_JSON" | jq -r '.response[0].url')
             VEN_URL=$(echo "$VEN_JSON" | jq -r '.response[0].url')
 
-            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o system.zip "$SYS_URL"
-            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o vendor.zip "$VEN_URL"
-
-            sudo unzip -q -o /tmp/system.zip -d /usr/share/waydroid-extra/images/
-            sudo unzip -q -o /tmp/vendor.zip -d /usr/share/waydroid-extra/images/
-            rm -f /tmp/system.zip /tmp/vendor.zip
+            UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            if aria2c -U "$UA" --max-tries=3 -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o system.zip "$SYS_URL" && \
+               aria2c -U "$UA" --max-tries=3 -x 16 -s 16 -k 1M --console-log-level=warn -d /tmp -o vendor.zip "$VEN_URL"; then
+              sudo unzip -q -o /tmp/system.zip -d /usr/share/waydroid-extra/images/
+              sudo unzip -q -o /tmp/vendor.zip -d /usr/share/waydroid-extra/images/
+              rm -f /tmp/system.zip /tmp/vendor.zip
+            else
+              echo "Direct aria2c blocked by mirror, falling back to waydroid init..."
+              rm -f /tmp/system.zip /tmp/vendor.zip
+            fi
 
             sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
 
             # Pre-download libhoudini via 16x aria2c so waydroid_script finishes in seconds
             mkdir -p ~/.cache/waydroid-script/downloads
             HOUDINI_URL="https://github.com/supremegamers/vendor_intel_proprietary_houdini/archive/812422136f22789438f7344f1210485d54d409c8.zip"
-            aria2c -x 16 -s 16 -k 1M --console-log-level=warn -d ~/.cache/waydroid-script/downloads -o "812422136f22789438f7344f1210485d54d409c8.zip" "$HOUDINI_URL" || true
+            aria2c -U "$UA" -x 16 -s 16 -k 1M --console-log-level=warn -d ~/.cache/waydroid-script/downloads -o "812422136f22789438f7344f1210485d54d409c8.zip" "$HOUDINI_URL" || true
 
             git clone --depth=1 https://github.com/casualsnek/waydroid_script /tmp/waydroid_script
             python3 -m venv /tmp/waydroid_script/venv
