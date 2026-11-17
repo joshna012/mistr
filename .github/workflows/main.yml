@@ -54,12 +54,15 @@ jobs:
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
-      - name: Fix Host Networking & Forwarding for Waydroid Internet
+      - name: Fix Host Networking & Docker Firewall for Waydroid Internet
         run: |
+          OUT_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
           sudo sysctl -w net.ipv4.ip_forward=1
           sudo iptables -P FORWARD ACCEPT
-          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
-          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
+          sudo iptables -C FORWARD -i waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i waydroid0 -j ACCEPT
+          sudo iptables -C FORWARD -o waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -o waydroid0 -j ACCEPT
+          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 -o "$OUT_IF" -j MASQUERADE 2>/dev/null || \
+          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 -o "$OUT_IF" -j MASQUERADE
 
       - name: Restore Waydroid & libhoudini Cache
         id: cache-waydroid
@@ -67,15 +70,17 @@ jobs:
         with:
           path: |
             /tmp/waydroid-cache
-          key: waydroid-fast-${{ github.event.inputs.android_type }}-v6
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v7
 
-      - name: Download Latest Reqable Android x86_64 APK (16x Parallel)
+      - name: Download Latest Reqable Android x86_64 APK
         run: |
           mkdir -p /tmp/apks
-          PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
-          APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
-          [ -z "$APK_URL" ] && APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
+          # 1. Try GitHub Releases API safely (handles null assets without failing)
+          REL_JSON=$(curl -sL "https://api.github.com/repos/reqable/reqable-app/releases/latest")
+          APK_URL=$(echo "$REL_JSON" | jq -r '.assets[]? | select(.name | test("android.*(x86_64|universal).*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
+          [ -z "$APK_URL" ] && APK_URL=$(echo "$REL_JSON" | jq -r '.assets[]? | select(.name | test("android.*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
 
+          # 2. Fallback to GitHub Releases HTML scraping
           if [ -z "$APK_URL" ]; then
             REL_HTML=$(curl -sL "https://github.com/reqable/reqable-app/releases")
             REL_PATH=$(echo "$REL_HTML" | grep -oE '/reqable/reqable-app/releases/download/[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
@@ -83,9 +88,19 @@ jobs:
             [ -n "$REL_PATH" ] && APK_URL="https://github.com${REL_PATH}"
           fi
 
-          if [ -n "$APK_URL" ]; then
-            aria2c -U "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || rm -f /tmp/apks/reqable.apk
+          # 3. Fallback to official Reqable download page
+          if [ -z "$APK_URL" ]; then
+            PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
+            APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
+            [ -z "$APK_URL" ] && APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+\.apk' | head -n 1)
           fi
+
+          if [ -n "$APK_URL" ]; then
+            echo "Downloading Reqable APK from: $APK_URL"
+            aria2c -U "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || \
+            curl -sL "$APK_URL" -o /tmp/apks/reqable.apk
+          fi
+          ls -lh /tmp/apks/ || true
 
       - name: Ultra-Fast Waydroid Setup (Direct Mirror 16x aria2c + ARM64 libhoudini)
         run: |
@@ -95,13 +110,13 @@ jobs:
           sudo mkdir -p /usr/share/waydroid-extra/images /var/lib/waydroid/images
 
           if [ -f /tmp/waydroid-cache/system.img ] && [ -f /tmp/waydroid-cache/vendor.img ]; then
-            echo "⚡ Restoring pre-built Waydroid + libhoudini images from cache..."
+            echo "Restoring pre-built Waydroid + libhoudini images from cache..."
             sudo cp /tmp/waydroid-cache/system.img /usr/share/waydroid-extra/images/
             sudo cp /tmp/waydroid-cache/vendor.img /usr/share/waydroid-extra/images/
             sudo waydroid init -s ${{ github.event.inputs.android_type }} -f
             [ -f /tmp/waydroid-cache/overlay.tar.gz ] && sudo tar -xzf /tmp/waydroid-cache/overlay.tar.gz -C /var/lib/waydroid
           else
-            echo "⚡ Converting SourceForge OTA links to direct CDN mirror URLs..."
+            echo "Converting SourceForge OTA links to direct CDN mirror URLs..."
             SYS_JSON=$(curl -sL "https://ota.waydro.id/system/lineage/waydroid_x86_64/${{ github.event.inputs.android_type }}.json")
             VEN_JSON=$(curl -sL "https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json")
 
@@ -127,7 +142,6 @@ jobs:
             /tmp/waydroid_script/venv/bin/pip install -q -r /tmp/waydroid_script/requirements.txt
             sudo /tmp/waydroid_script/venv/bin/python3 /tmp/waydroid_script/main.py install libhoudini
 
-            # Save images from whichever directory they reside in
             if [ -f /usr/share/waydroid-extra/images/system.img ]; then
               sudo cp /usr/share/waydroid-extra/images/system.img /tmp/waydroid-cache/
               sudo cp /usr/share/waydroid-extra/images/vendor.img /tmp/waydroid-cache/
@@ -155,6 +169,7 @@ jobs:
       - name: Setup Auto-CA Installer & Certificate Export Web Server
         run: |
           mkdir -p ~/exported-certs ~/Desktop ~/.vnc ~/.config
+          sudo chown -R $USER:$USER ~/.vnc ~/.config ~/Desktop ~/exported-certs
           touch ~/.Xauthority
           echo "waydroid123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
@@ -254,10 +269,14 @@ jobs:
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
+          # Ensure Docker firewall does not block Waydroid internet
+          OUT_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
           sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
           sudo iptables -P FORWARD ACCEPT
-          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE 2>/dev/null || \
-          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 ! -d 192.168.240.0/24 -j MASQUERADE
+          sudo iptables -C FORWARD -i waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i waydroid0 -j ACCEPT
+          sudo iptables -C FORWARD -o waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -o waydroid0 -j ACCEPT
+          sudo iptables -t nat -C POSTROUTING -s 192.168.240.0/24 -o "$OUT_IF" -j MASQUERADE 2>/dev/null || \
+          sudo iptables -t nat -A POSTROUTING -s 192.168.240.0/24 -o "$OUT_IF" -j MASQUERADE
 
           pkill -f weston || true
           rm -f "$XDG_RUNTIME_DIR"/wayland-*
@@ -274,10 +293,12 @@ jobs:
             export WAYLAND_DISPLAY=$(basename "$SOCK")
             waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
 
-            for i in {1..45}; do
+            for i in {1..60}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
                 sudo waydroid shell settings put global captive_portal_mode 0
+                sudo waydroid shell sh -c 'ip route add default via 192.168.240.1 dev eth0 2>/dev/null || true; ndc resolver setnetdns eth0 "" 8.8.8.8 1.1.1.1 2>/dev/null || true'
                 if [ -f /tmp/apks/reqable.apk ]; then
+                  echo "Installing Reqable APK..." >> /tmp/waydroid-ui.log
                   waydroid app install /tmp/apks/reqable.apk >> /tmp/waydroid-ui.log 2>&1 || true
                 fi
                 sudo waydroid shell sh -c '
@@ -294,11 +315,12 @@ jobs:
             done
           ) &
 
-          exec weston --backend=x11-backend.so --width=1280 --height=720 > /tmp/weston.log 2>&1
+          weston --backend=x11-backend.so --width=1280 --height=720 > /tmp/weston.log 2>&1
           EOF
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
 
+          # Display :1 xstartup (Full Linux Desktop)
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
           unset SESSION_MANAGER
@@ -313,6 +335,7 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
+          # Display :2 xstartup (Dedicated Android-Only session with xfwm4 + auto-respawn loop)
           cat << 'EOF' > ~/.vnc/xstartup-android
           #!/bin/bash
           unset SESSION_MANAGER
@@ -322,7 +345,12 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
-          exec ~/Desktop/start-android-only.sh
+          xfwm4 --compositor=off &
+          sleep 1
+          while true; do
+            ~/Desktop/start-android-only.sh
+            sleep 2
+          done
           EOF
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup-android
           chmod +x ~/.vnc/xstartup-android
@@ -330,6 +358,8 @@ jobs:
       - name: Start Waydroid Container, Dual VNC (:1 Linux & :2 Android) & noVNC
         run: |
           sudo systemctl enable --now waydroid-container
+          sudo chown -R $USER:$USER ~/.vnc
+          rm -f ~/.vnc/*.log ~/.vnc/*.pid
 
           vncserver :1 -geometry 1366x768 -depth 24 -localhost no -xstartup ~/.vnc/xstartup
           nohup websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/novnc-linux.log 2>&1 &
