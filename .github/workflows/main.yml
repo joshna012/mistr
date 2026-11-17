@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (Full Fixed + Zedge IPv6/ARM64 + Fast Mouse + Reqable + Auto-CA)
+name: Waydroid Root in Browser (Full Fixed + Fast Cache + GAPPS + ARM64 + Reqable + Auto-CA)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
             curl wget git jq aria2 unzip lsb-release ca-certificates gnupg \
             software-properties-common build-essential linux-headers-$(uname -r) openssl \
             python3-venv python3-pip lzip \
-            xfce4 xfce4-terminal dbus-x11 x11-xserver-utils \
+            xfce4 xfce4-terminal dbus-x11 \
             weston xwayland mesa-utils libgl1-mesa-dri iptables dnsmasq pulseaudio \
             tigervnc-standalone-server tigervnc-common \
             novnc websockify python3-numpy net-tools
@@ -54,12 +54,10 @@ jobs:
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
-      - name: Fix Host Networking, Disable IPv6 Blackhole & Bypass Docker Firewall
+      - name: Fix Host Networking & Docker Firewall for Waydroid Internet
         run: |
           OUT_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
           sudo sysctl -w net.ipv4.ip_forward=1
-          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
-          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
           sudo iptables -P FORWARD ACCEPT
           sudo iptables -C FORWARD -i waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i waydroid0 -j ACCEPT
           sudo iptables -C FORWARD -o waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -o waydroid0 -j ACCEPT
@@ -72,7 +70,7 @@ jobs:
         with:
           path: |
             /tmp/waydroid-cache
-          key: waydroid-fast-${{ github.event.inputs.android_type }}-v11
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v9
 
       - name: Download Latest Reqable Android x86_64 APK
         run: |
@@ -99,7 +97,7 @@ jobs:
             curl -sL "$APK_URL" -o /tmp/apks/reqable.apk
           fi
 
-      - name: Ultra-Fast Waydroid Setup (Direct Mirror 16x aria2c + ARM64 libhoudini + Fake Wi-Fi)
+      - name: Ultra-Fast Waydroid Setup (Direct Mirror 16x aria2c + ARM64 libhoudini)
         run: |
           curl -s https://repo.waydro.id | sudo bash
           sudo apt-get install -y -qq waydroid
@@ -150,17 +148,13 @@ jobs:
             sudo chown -R $USER:$USER /tmp/waydroid-cache || true
           fi
 
-          # Persist CPU/OpenGL rendering + ARM64/ARM32 libhoudini + Fake Wi-Fi properties
-          sudo sed -i '/ro.hardware.gralloc/d;/ro.hardware.egl/d;/ro.hwui.use_vulkan/d;/persist.waydroid.udev/d;/native.bridge/d;/cpu.abilist/d;/fake_wifi/d;/multi_windows/d' /var/lib/waydroid/waydroid.cfg
-          grep -q '^\[properties\]' /var/lib/waydroid/waydroid.cfg || echo "[properties]" | sudo tee -a /var/lib/waydroid/waydroid.cfg > /dev/null
+          # Persist CPU rendering + ARM64/ARM32 libhoudini native bridge properties
+          sudo sed -i '/ro.hardware.gralloc/d;/ro.hardware.egl/d;/persist.waydroid.udev/d;/native.bridge/d;/cpu.abilist/d' /var/lib/waydroid/waydroid.cfg
 
           cat << 'EOF' | sudo tee -a /var/lib/waydroid/waydroid.cfg > /dev/null
           ro.hardware.gralloc=default
           ro.hardware.egl=swiftshader
-          ro.hwui.use_vulkan=false
           persist.waydroid.udev=false
-          persist.waydroid.multi_windows=false
-          persist.waydroid.fake_wifi=*
           ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
           ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi
           ro.product.cpu.abilist64=x86_64,arm64-v8a
@@ -271,7 +265,6 @@ jobs:
           export DISPLAY=:2
           export XDG_RUNTIME_DIR=/tmp/runtime-android
           export LIBGL_ALWAYS_SOFTWARE=1
-          xset m 3 1 2>/dev/null || true
           mkdir -p "$XDG_RUNTIME_DIR/pulse"
           chmod 700 "$XDG_RUNTIME_DIR"
           touch "$XDG_RUNTIME_DIR/pulse/native"
@@ -280,8 +273,6 @@ jobs:
 
           OUT_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
           sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
-          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
           sudo iptables -P FORWARD ACCEPT
           sudo iptables -C FORWARD -i waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i waydroid0 -j ACCEPT
           sudo iptables -C FORWARD -o waydroid0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -o waydroid0 -j ACCEPT
@@ -305,16 +296,8 @@ jobs:
 
             for i in {1..60}; do
               if sudo waydroid shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
-                sudo waydroid prop set persist.waydroid.fake_wifi "*"
                 sudo waydroid shell settings put global captive_portal_mode 0
-                sudo waydroid shell settings put system pointer_speed 7
-                sudo waydroid shell service call SurfaceFlinger 1008 i32 1 >/dev/null 2>&1 || true
-                sudo waydroid shell sh -c '
-                  sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-                  sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-                  ip route add default via 192.168.240.1 dev eth0 2>/dev/null || true
-                  ndc resolver setnetdns eth0 "" 8.8.8.8 1.1.1.1 2>/dev/null || true
-                '
+                sudo waydroid shell sh -c 'ip route add default via 192.168.240.1 dev eth0 2>/dev/null || true; ndc resolver setnetdns eth0 "" 8.8.8.8 1.1.1.1 2>/dev/null || true'
                 if [ -f /tmp/apks/reqable.apk ]; then
                   waydroid app install /tmp/apks/reqable.apk >> /tmp/waydroid-ui.log 2>&1 || true
                 fi
