@@ -1,4 +1,4 @@
-name: Waydroid Root in Browser (Full Fixed + Fast Cache + GAPPS + ARM64 + Reqable)
+name: Waydroid Root in Browser (Full Fixed + Fast Cache + GAPPS + ARM64 + Reqable + Auto-CA)
 
 on:
   workflow_dispatch:
@@ -70,17 +70,15 @@ jobs:
         with:
           path: |
             /tmp/waydroid-cache
-          key: waydroid-fast-${{ github.event.inputs.android_type }}-v7
+          key: waydroid-fast-${{ github.event.inputs.android_type }}-v9
 
       - name: Download Latest Reqable Android x86_64 APK
         run: |
           mkdir -p /tmp/apks
-          # 1. Try GitHub Releases API safely (handles null assets without failing)
           REL_JSON=$(curl -sL "https://api.github.com/repos/reqable/reqable-app/releases/latest")
           APK_URL=$(echo "$REL_JSON" | jq -r '.assets[]? | select(.name | test("android.*(x86_64|universal).*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
           [ -z "$APK_URL" ] && APK_URL=$(echo "$REL_JSON" | jq -r '.assets[]? | select(.name | test("android.*\\.apk$"; "i")) | .browser_download_url' | head -n 1)
 
-          # 2. Fallback to GitHub Releases HTML scraping
           if [ -z "$APK_URL" ]; then
             REL_HTML=$(curl -sL "https://github.com/reqable/reqable-app/releases")
             REL_PATH=$(echo "$REL_HTML" | grep -oE '/reqable/reqable-app/releases/download/[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
@@ -88,7 +86,6 @@ jobs:
             [ -n "$REL_PATH" ] && APK_URL="https://github.com${REL_PATH}"
           fi
 
-          # 3. Fallback to official Reqable download page
           if [ -z "$APK_URL" ]; then
             PAGE_HTML=$(curl -sL "https://reqable.com/en-US/download/")
             APK_URL=$(echo "$PAGE_HTML" | grep -oE 'https://[^"'\'' ]+android[^"'\'' ]*(x86_64|universal)[^"'\'' ]*\.apk' | head -n 1)
@@ -96,11 +93,9 @@ jobs:
           fi
 
           if [ -n "$APK_URL" ]; then
-            echo "Downloading Reqable APK from: $APK_URL"
             aria2c -U "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -x 16 -s 16 --console-log-level=warn -d /tmp/apks -o reqable.apk "$APK_URL" || \
             curl -sL "$APK_URL" -o /tmp/apks/reqable.apk
           fi
-          ls -lh /tmp/apks/ || true
 
       - name: Ultra-Fast Waydroid Setup (Direct Mirror 16x aria2c + ARM64 libhoudini)
         run: |
@@ -153,14 +148,17 @@ jobs:
             sudo chown -R $USER:$USER /tmp/waydroid-cache || true
           fi
 
-          sudo sed -i '/ro.hardware.gralloc/d' /var/lib/waydroid/waydroid.cfg
-          sudo sed -i '/ro.hardware.egl/d' /var/lib/waydroid/waydroid.cfg
-          sudo sed -i '/persist.waydroid.udev/d' /var/lib/waydroid/waydroid.cfg
+          # Persist CPU rendering + ARM64/ARM32 libhoudini native bridge properties
+          sudo sed -i '/ro.hardware.gralloc/d;/ro.hardware.egl/d;/persist.waydroid.udev/d;/native.bridge/d;/cpu.abilist/d' /var/lib/waydroid/waydroid.cfg
 
           cat << 'EOF' | sudo tee -a /var/lib/waydroid/waydroid.cfg > /dev/null
           ro.hardware.gralloc=default
           ro.hardware.egl=swiftshader
           persist.waydroid.udev=false
+          ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
+          ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi
+          ro.product.cpu.abilist64=x86_64,arm64-v8a
+          ro.dalvik.vm.native.bridge=libhoudini.so
           EOF
 
           sudo sed -i 's/lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/g' /var/lib/waydroid/lxc/waydroid/config 2>/dev/null || true
@@ -177,7 +175,8 @@ jobs:
           cat << 'EOF' > ~/Desktop/install-cert-to-system.sh
           #!/bin/bash
           EXPORT_DIR="$HOME/exported-certs"
-          ANDROID_DL="/var/lib/waydroid/data/media/0/Download"
+          USER_DL="$HOME/.local/share/waydroid/data/media/0/Download"
+          SYS_DL="/var/lib/waydroid/data/media/0/Download"
           mkdir -p "$EXPORT_DIR"
           sudo mkdir -p /var/lib/waydroid/overlay/system/etc/security/cacerts
 
@@ -191,20 +190,22 @@ jobs:
                 chown -R root:root /tmp/cacerts_tmp
                 chmod 644 /tmp/cacerts_tmp/*
                 mount --bind /tmp/cacerts_tmp /apex/com.android.conscrypt/cacerts
+                am force-stop com.reqable.android 2>/dev/null || true
               '
             fi
           }
 
           process_file() {
             FILE="$1"
-            [ -f "$FILE" ] || return
+            sudo test -f "$FILE" || return
             BASENAME=$(basename "$FILE")
             sudo cp "$FILE" "$EXPORT_DIR/$BASENAME"
             sudo chown $USER:$USER "$EXPORT_DIR/$BASENAME"
+            LOCAL_FILE="$EXPORT_DIR/$BASENAME"
 
             if [[ "$BASENAME" == *.0 || "$BASENAME" == *.crt || "$BASENAME" == *.pem || "$BASENAME" == *.cer ]]; then
-              openssl x509 -inform PEM -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || \
-              openssl x509 -inform DER -in "$FILE" -out /tmp/current_ca.pem 2>/dev/null || return
+              openssl x509 -inform PEM -in "$LOCAL_FILE" -out /tmp/current_ca.pem 2>/dev/null || \
+              openssl x509 -inform DER -in "$LOCAL_FILE" -out /tmp/current_ca.pem 2>/dev/null || return
 
               HASH=$(openssl x509 -inform PEM -subject_hash_old -in /tmp/current_ca.pem | head -1)
               if [ -n "$HASH" ]; then
@@ -219,16 +220,17 @@ jobs:
             fi
           }
 
-          sudo find "$ANDROID_DL" -maxdepth 3 -type f \( -name "*.0" -o -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) 2>/dev/null | while read -r f; do
-            process_file "$f"
-          done
-
           while true; do
-            if sudo test -d "$ANDROID_DL"; then
-              sudo find "$ANDROID_DL" -maxdepth 3 -type f \( -name "*.0" -o -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) -mmin -2 2>/dev/null | while read -r f; do
-                process_file "$f"
-              done
-            fi
+            for DL_DIR in "$USER_DL" "$SYS_DL"; do
+              if sudo test -d "$DL_DIR"; then
+                sudo find "$DL_DIR" -maxdepth 4 -type f \( -name "*.0" -o -name "*.crt" -o -name "*.pem" -o -name "*.cer" -o -name "*.p12" \) 2>/dev/null | while read -r f; do
+                  BASENAME=$(basename "$f")
+                  if [ ! -f "$EXPORT_DIR/$BASENAME" ]; then
+                    process_file "$f"
+                  fi
+                done
+              fi
+            done
             sleep 3
           done
           EOF
@@ -269,7 +271,6 @@ jobs:
           sudo chmod 755 /dev/binderfs 2>/dev/null || true
           sudo chmod 666 /dev/binderfs/* /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 
-          # Ensure Docker firewall does not block Waydroid internet
           OUT_IF=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
           sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
           sudo iptables -P FORWARD ACCEPT
@@ -298,7 +299,6 @@ jobs:
                 sudo waydroid shell settings put global captive_portal_mode 0
                 sudo waydroid shell sh -c 'ip route add default via 192.168.240.1 dev eth0 2>/dev/null || true; ndc resolver setnetdns eth0 "" 8.8.8.8 1.1.1.1 2>/dev/null || true'
                 if [ -f /tmp/apks/reqable.apk ]; then
-                  echo "Installing Reqable APK..." >> /tmp/waydroid-ui.log
                   waydroid app install /tmp/apks/reqable.apk >> /tmp/waydroid-ui.log 2>&1 || true
                 fi
                 sudo waydroid shell sh -c '
@@ -320,7 +320,6 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/Desktop/start-android-only.sh
           chmod +x ~/Desktop/start-android-only.sh
 
-          # Display :1 xstartup (Full Linux Desktop)
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/bash
           unset SESSION_MANAGER
@@ -335,7 +334,6 @@ jobs:
           sed -i 's/^[[:space:]]*//' ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
 
-          # Display :2 xstartup (Dedicated Android-Only session with xfwm4 + auto-respawn loop)
           cat << 'EOF' > ~/.vnc/xstartup-android
           #!/bin/bash
           unset SESSION_MANAGER
